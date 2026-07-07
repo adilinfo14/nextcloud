@@ -1,0 +1,102 @@
+/**
+ * Territoire "Minimalisme Noir" — TKonsulting
+ * Toutes les règles ci-dessous sont additives et non destructives : si un
+ * sélecteur ne correspond plus au markup Nextcloud après une mise à jour,
+ * il est simplement ignoré (aucune casse possible, contrairement à du JS).
+ */
+
+/* Liseré or fin et discret sur les scrollbars (Chromium/Edge/Electron desktop client) */
+::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+::-webkit-scrollbar-thumb {
+	background-color: rgba(201, 168, 76, 0.35);
+	border-radius: 8px;
+	border: 2px solid transparent;
+	background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+	background-color: rgba(201, 168, 76, 0.6);
+}
+
+/* Firefox */
+* {
+	scrollbar-color: rgba(201, 168, 76, 0.35) transparent;
+}
+
+/* Accent or discret sur les entrées de navigation (sidebar Fichiers, Paramètres, etc.)
+   au survol et à l'état actif — .app-navigation-entry est une classe stable
+   de la librairie @nextcloud/vue utilisée par la plupart des apps. */
+.app-navigation-entry:hover {
+	box-shadow: inset 3px 0 0 0 rgba(201, 168, 76, 0.5);
+}
+.app-navigation-entry.active,
+.app-navigation-entry--selected {
+	box-shadow: inset 3px 0 0 0 #c9a84c;
+}
+
+/* Fine bordure or sous la barre d'application du haut, pour marquer la
+   séparation avec le contenu sans surcharger le noir */
+#header,
+.header {
+	border-bottom: 1px solid rgba(201, 168, 76, 0.25);
+}
+
+/* Widgets du tableau de bord : liseré or en haut de chaque carte */
+.dashboard-widget,
+.panel {
+	border-top: 2px solid rgba(201, 168, 76, 0.6);
+}
+
+/* Boutons primaires : légère lueur dorée au survol pour renforcer la charte */
+.button-vue--vue-primary:hover,
+button.primary:hover,
+input[type='submit'].primary:hover {
+	box-shadow: 0 0 0 2px rgba(201, 168, 76, 0.4);
+}
+
+/* Correctif responsive mobile : les diagrammes Mermaid (Collectives/Text)
+   ont une largeur fixe codée dans leur SVG et débordent sur petit écran,
+   ce qui casse le viewport de toute la page (pas juste la zone du schéma).
+   On force le SVG à respecter la largeur de son conteneur. */
+.text-editor svg,
+.text-editor__content svg,
+[data-text-el] svg,
+svg[id*='mermaid' i],
+svg[id*='flowchart' i] {
+	max-width: 100%;
+	height: auto;
+}
+
+/* Filet de sécurité général : aucune image/svg ne devrait pouvoir élargir
+   la page au-delà du viewport, sur mobile comme sur desktop. */
+img,
+svg {
+	max-width: 100%;
+	height: auto;
+}
+
+/* Cartes Deck (Kanban) : classe confirmée via inspecteur navigateur (CardItem.vue).
+   On ignore le hash data-v-xxx généré à chaque build, seul .card est stable. */
+.card {
+	border-radius: 8px;
+	transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+.card:hover {
+	box-shadow: 0 2px 10px rgba(201, 168, 76, 0.35);
+	transform: translateY(-1px);
+}
+
+/* Modales (fiche de carte Deck, partage, etc.) : liseré or sous l'en-tête,
+   classes NcModal partagées par toute l'interface — confirmées via inspecteur. */
+.modal-header {
+	border-bottom: 1px solid rgba(201, 168, 76, 0.2);
+}
+.modal-container__close:hover,
+.button-vue--vue-tertiary:hover {
+	box-shadow: 0 0 0 2px rgba(201, 168, 76, 0.3);
+}

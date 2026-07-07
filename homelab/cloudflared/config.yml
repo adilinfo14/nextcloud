@@ -1,0 +1,32 @@
+tunnel: 58e334be-576f-46ba-b047-14661e829f56
+credentials-file: /home/adil/.cloudflared/58e334be-576f-46ba-b047-14661e829f56.json
+
+ingress:
+  - hostname: sondage.noschoixpourvous.com
+    service: http://127.0.0.1:5050
+
+  - hostname: n8n.noschoixpourvous.com
+    service: http://127.0.0.1:5678
+
+  - hostname: nextcloud.noschoixpourvous.com
+    service: http://127.0.0.1:80
+
+  - hostname: ia.noschoixpourvous.com
+    service: http://127.0.0.1:80
+
+  - hostname: ftms-concept.noschoixpourvous.com
+    service: http://127.0.0.1:80
+
+  - hostname: www.ftms-concept.noschoixpourvous.com
+    service: http://127.0.0.1:80
+
+  - hostname: confia.noschoixpourvous.com
+    service: http://127.0.0.1:80
+
+  - hostname: signaling.noschoixpourvous.com
+    service: http://127.0.0.1:80
+
+  - hostname: ssh.noschoixpourvous.com
+    service: ssh://127.0.0.1:49222
+
+  - service: http_status:404

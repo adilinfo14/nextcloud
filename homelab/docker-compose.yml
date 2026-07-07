@@ -1,0 +1,45 @@
+version: "3.8"
+
+services:
+  db:
+    image: mariadb:11
+    restart: always
+    command: --transaction-isolation=READ-COMMITTED --binlog-format=ROW
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloud
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+    volumes:
+      - nextcloud-db:/var/lib/mysql
+
+  app:
+    container_name: nextcloud
+    image: nextcloud
+    restart: always
+    expose:
+      - "80"                # important : pas de port public, car proxypass
+    environment:
+      - MYSQL_HOST=db
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloud
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.noschoixpourvous.com
+      - PHP_MEMORY_LIMIT=1536M
+    extra_hosts:
+      - "nextcloud.noschoixpourvous.com:host-gateway"
+    volumes:
+      - nextcloud-data:/var/www/html
+    depends_on:
+      - db
+    networks:
+      - proxy-net
+      - default
+
+volumes:
+  nextcloud-db:
+  nextcloud-data:
+
+networks:
+  proxy-net:
+    external: true

@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
+	<id>tk_theme</id>
+	<name>TKonsulting Theme Refinements</name>
+	<summary>Petits ajustements CSS pour le territoire de marque TKonsulting (noir/or)</summary>
+	<description>Ajoute des touches visuelles discrètes (bordures dorées, scrollbar, accents) par-dessus le theming admin standard. N'importe quelle règle qui ne correspond plus au markup Nextcloud après une mise à jour est simplement ignorée, sans casser l'instance.</description>
+	<version>1.0.0</version>
+	<licence>agpl</licence>
+	<author>TKonsulting</author>
+	<namespace>TkTheme</namespace>
+	<category>customization</category>
+	<dependencies>
+		<nextcloud min-version="30" max-version="32"/>
+	</dependencies>
+</info>

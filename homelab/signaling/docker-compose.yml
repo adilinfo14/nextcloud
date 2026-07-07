@@ -1,0 +1,15 @@
+services:
+  signaling:
+    image: strukturag/nextcloud-spreed-signaling:latest
+    container_name: signaling
+    restart: always
+    environment:
+      - CONFIG=/config/server.conf
+    volumes:
+      - /home/adil/signaling/server.conf:/config/server.conf:ro
+    networks:
+      - proxy-net
+
+networks:
+  proxy-net:
+    external: true
