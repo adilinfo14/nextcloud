@@ -261,7 +261,18 @@ fi
 # ----------------------------------------------------------------------------
 
 info "Démarrage des conteneurs..."
-docker compose up -d
+# notify_push n'est PAS démarré ici : son binaire vit dans l'app 'notify_push',
+# pas encore installée à ce stade -> le conteneur planterait (binaire absent du
+# volume nc-data) et ferait avorter tout le script (set -e sur docker compose up -d
+# qui retourne un code d'erreur des qu'UN SEUL service echoue a demarrer, meme
+# si les autres services demarrent correctement). Il sera démarré plus tard,
+# une fois l'app installée. whiteboard, lui, est une image autonome (pas de
+# dépendance sur le volume nc-data) et peut démarrer immédiatement.
+INITIAL_SERVICES="db redis app"
+if [ -n "$WHITEBOARD_DOMAIN" ]; then
+    INITIAL_SERVICES="$INITIAL_SERVICES whiteboard"
+fi
+docker compose up -d $INITIAL_SERVICES
 
 info "Attente de l'installation automatique de Nextcloud (peut prendre 1-2 minutes)..."
 TRIES=0
@@ -339,6 +350,9 @@ fi
 if [ -n "$PUSH_DOMAIN" ]; then
     info "Installation de Client Push (notify_push)..."
     install_app "notify_push"
+    info "Démarrage du conteneur notify_push (le binaire est maintenant présent sur le volume, l'app venant d'être installée)..."
+    docker compose up -d notify_push
+    sleep 3
     info "Configuration de notify_push (peut échouer si le reverse proxy pour '$PUSH_DOMAIN' n'est pas encore en place)..."
     if occ notify_push:setup "https://$PUSH_DOMAIN" 2>&1; then
         ok "Client Push configuré et vérifié."
