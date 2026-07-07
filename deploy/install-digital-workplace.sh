@@ -114,6 +114,28 @@ FORCE_DARK="$REPLY_VAL"
 ask "Installer les apps 'lourdes' optionnelles (Recognize, Whiteboard) ? (o/n)" "n"
 HEAVY_APPS="$REPLY_VAL"
 
+WHITEBOARD_DOMAIN=""
+WHITEBOARD_SECRET=""
+if [ "$HEAVY_APPS" = "o" ] || [ "$HEAVY_APPS" = "O" ]; then
+    ask "Nom de domaine public pour le service Whiteboard (ex: whiteboard.exemple.com)" ""
+    WHITEBOARD_DOMAIN="$REPLY_VAL"
+    if [ -n "$WHITEBOARD_DOMAIN" ]; then
+        WHITEBOARD_SECRET=$(gen_secret)
+    fi
+fi
+
+ask "Activer Client Push (notify_push, notifications temps réel mobile/desktop) ? (o/n)" "o"
+ENABLE_PUSH="$REPLY_VAL"
+
+PUSH_DOMAIN=""
+if [ "$ENABLE_PUSH" = "o" ] || [ "$ENABLE_PUSH" = "O" ]; then
+    ask "Nom de domaine public pour Client Push (ex: push.exemple.com)" ""
+    PUSH_DOMAIN="$REPLY_VAL"
+fi
+
+ask "Code pays par défaut pour les numéros de téléphone (ISO 3166-1, ex: FR, MA, US)" "FR"
+PHONE_REGION="$REPLY_VAL"
+
 ask "Chemin d'installation sur ce serveur" "$HOME/nextcloud-workplace"
 INSTALL_DIR="$REPLY_VAL"
 
@@ -125,6 +147,9 @@ echo "  Admin             : $ADMIN_USER"
 echo "  Couleur accent    : $PRIMARY_COLOR"
 echo "  Couleur de fond   : $BACKGROUND_COLOR"
 echo "  Thème sombre forcé: $FORCE_DARK"
+echo "  Région téléphone  : $PHONE_REGION"
+echo "  Client Push       : ${PUSH_DOMAIN:-non}"
+echo "  Whiteboard        : ${WHITEBOARD_DOMAIN:-non}"
 echo "  Répertoire        : $INSTALL_DIR"
 echo
 read -r -p "Continuer ? (o/n) : " CONFIRM
@@ -182,6 +207,44 @@ services:
     depends_on:
       - db
       - redis
+EOF
+
+if [ -n "$PUSH_DOMAIN" ]; then
+    cat >> docker-compose.yml <<EOF
+
+  notify_push:
+    image: nextcloud
+    container_name: notify_push
+    restart: always
+    entrypoint: ["/var/www/html/custom_apps/notify_push/bin/x86_64/notify_push"]
+    command: ["--port", "7867", "--nextcloud-url", "https://${DOMAIN}", "--redis-url", "redis://redis:6379", "--database-url", "mysql://nextcloud:${DB_PASSWORD}@db/nextcloud"]
+    volumes:
+      - nc-data:/var/www/html:ro
+    depends_on:
+      - db
+      - redis
+      - app
+EOF
+    ok "Service notify_push ajouté au docker-compose.yml"
+fi
+
+if [ -n "$WHITEBOARD_DOMAIN" ]; then
+    cat >> docker-compose.yml <<EOF
+
+  whiteboard:
+    image: ghcr.io/nextcloud-releases/whiteboard:latest
+    container_name: whiteboard
+    restart: always
+    environment:
+      - NEXTCLOUD_URL=https://${DOMAIN}
+      - JWT_SECRET_KEY=${WHITEBOARD_SECRET}
+    depends_on:
+      - app
+EOF
+    ok "Service whiteboard ajouté au docker-compose.yml"
+fi
+
+cat >> docker-compose.yml <<EOF
 
 volumes:
   db-data:
@@ -189,6 +252,9 @@ volumes:
 EOF
 ok "docker-compose.yml généré dans $INSTALL_DIR"
 warn "NOTE : ce compose expose Nextcloud sur le port 8080 de l'hôte en HTTP. Mets un reverse proxy (nginx/Caddy/Traefik) devant avec un certificat HTTPS pour le domaine '$DOMAIN' avant d'exposer publiquement — ce script ne gère pas cette partie (dépend trop de l'infra existante du serveur cible)."
+if [ -n "$PUSH_DOMAIN" ] || [ -n "$WHITEBOARD_DOMAIN" ]; then
+    warn "Client Push et/ou Whiteboard ont aussi besoin d'un vhost HTTPS dédié sur le reverse proxy (support WebSocket obligatoire), à ajouter en même temps que celui de Nextcloud."
+fi
 
 # ----------------------------------------------------------------------------
 # Démarrage
@@ -225,6 +291,13 @@ occ background:cron
 ok "Pense à ajouter cette ligne à la crontab de l'hôte (pas fait automatiquement par ce script) :"
 echo "    */5 * * * * docker exec -u www-data nextcloud php -f /var/www/html/cron.php >> $INSTALL_DIR/cron.log 2>&1"
 
+info "Corrections de la page 'Avertissements de sécurité & configuration'..."
+occ config:system:set maintenance_window_start --value=3 --type=integer
+occ config:system:set default_phone_region --value="$PHONE_REGION"
+occ maintenance:repair --include-expensive >/dev/null 2>&1 && ok "Migrations de types MIME appliquées" || warn "Migrations MIME : échec (non bloquant, relancer plus tard avec 'occ maintenance:repair --include-expensive')"
+occ db:add-missing-indices >/dev/null 2>&1 && ok "Index de base de données ajoutés" || warn "Index DB : échec (non bloquant, relancer plus tard avec 'occ db:add-missing-indices')"
+warn "trusted_proxies N'EST PAS configuré automatiquement (dépend de l'IP du reverse proxy qui sera mis en place) — une fois le reverse proxy choisi, exécuter : occ config:system:set trusted_proxies 0 --value='<IP-ou-sous-réseau-du-proxy>' (sinon le ralentisseur anti-force-brute pénalisera à tort tout le trafic)."
+
 # ----------------------------------------------------------------------------
 # Apps - socle digital workplace
 # ----------------------------------------------------------------------------
@@ -254,7 +327,24 @@ if [ "$HEAVY_APPS" = "o" ] || [ "$HEAVY_APPS" = "O" ]; then
     info "Installation des apps lourdes optionnelles..."
     install_app "recognize"
     install_app "whiteboard"
-    warn "Whiteboard nécessite un service serveur externe (nextcloud-whiteboard-server) pour fonctionner pleinement — non déployé par ce script."
+    if [ -n "$WHITEBOARD_DOMAIN" ]; then
+        occ config:app:set whiteboard jwt_secret_key --value="$WHITEBOARD_SECRET"
+        occ config:app:set whiteboard collabBackendUrl --value="https://$WHITEBOARD_DOMAIN"
+        ok "Whiteboard configuré (domaine : $WHITEBOARD_DOMAIN) — nécessite que le reverse proxy route bien ce domaine vers le conteneur 'whiteboard' (port 3002, support WebSocket)."
+    else
+        warn "Whiteboard installé mais pas configuré (pas de domaine fourni) — l'app ne fonctionnera pas pleinement tant que collabBackendUrl/jwt_secret_key ne sont pas réglés."
+    fi
+fi
+
+if [ -n "$PUSH_DOMAIN" ]; then
+    info "Installation de Client Push (notify_push)..."
+    install_app "notify_push"
+    info "Configuration de notify_push (peut échouer si le reverse proxy pour '$PUSH_DOMAIN' n'est pas encore en place)..."
+    if occ notify_push:setup "https://$PUSH_DOMAIN" 2>&1; then
+        ok "Client Push configuré et vérifié."
+    else
+        warn "Configuration de Client Push incomplète — relancer 'occ notify_push:setup https://$PUSH_DOMAIN' une fois le reverse proxy de ce domaine en place."
+    fi
 fi
 
 # ----------------------------------------------------------------------------
@@ -320,9 +410,19 @@ echo "    MYSQL_ROOT_PASSWORD : $DB_ROOT_PASSWORD"
 echo
 warn "Étapes manuelles restantes (volontairement non automatisées) :"
 echo "  1. Mettre un reverse proxy HTTPS (nginx/Caddy/Traefik) devant le port 8080 pour '$DOMAIN'"
+if [ -n "$PUSH_DOMAIN" ]; then
+    echo "     + un vhost HTTPS/WebSocket pour '$PUSH_DOMAIN' -> conteneur notify_push:7867"
+fi
+if [ -n "$WHITEBOARD_DOMAIN" ]; then
+    echo "     + un vhost HTTPS/WebSocket pour '$WHITEBOARD_DOMAIN' -> conteneur whiteboard:3002"
+fi
 echo "  2. Ajouter la ligne cron indiquée plus haut à la crontab de l'hôte"
-echo "  3. Configurer les groupes/équipes clients (voir doc fournie séparément)"
-echo "  4. Pour Talk en visio multi-participants fiable : prévoir un serveur TURN + serveur de signalisation"
+echo "  3. Une fois le reverse proxy en place : occ config:system:set trusted_proxies 0 --value='<IP-du-proxy>'"
+if [ -n "$PUSH_DOMAIN" ]; then
+    echo "  4. Si Client Push a échoué faute de reverse proxy encore absent : relancer 'occ notify_push:setup https://$PUSH_DOMAIN'"
+fi
+echo "  5. Configurer les groupes/équipes clients (voir doc fournie séparément)"
+echo "  6. Pour Talk en visio multi-participants fiable : prévoir un serveur TURN + serveur de signalisation"
 echo "     (non générique d'un client à l'autre, dépend de la topologie réseau — cf. README du dépôt)"
 echo
 ok "Script terminé."
