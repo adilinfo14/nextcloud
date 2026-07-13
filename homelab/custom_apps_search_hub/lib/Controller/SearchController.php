@@ -49,6 +49,67 @@ class SearchController extends Controller {
 		return new TemplateResponse('search_hub', 'main');
 	}
 
+	/**
+	 * Suggestions de titres pour la barre de recherche (autocompletion), en complement
+	 * de l'historique local gere cote client (localStorage). Reutilise
+	 * IFullTextSearchManager::search() - donc le meme controle d'acces que la recherche
+	 * normale - avec un lot volontairement petit, plutot qu'une requete ES dediee.
+	 */
+	#[NoAdminRequired]
+	#[NoCSRFRequired]
+	#[UserRateLimit(limit: 60, period: 60)]
+	public function suggest(): JSONResponse {
+		$user = $this->userSession->getUser();
+		if ($user === null) {
+			return new JSONResponse(['suggestions' => []]);
+		}
+
+		$term = trim((string)$this->request->getParam('term', ''));
+		if (mb_strlen($term) < 2 || !$this->fullTextSearchManager->isAvailable()) {
+			return new JSONResponse(['suggestions' => []]);
+		}
+		if (mb_strlen($term) > self::MAX_TERM_LENGTH) {
+			$term = mb_substr($term, 0, self::MAX_TERM_LENGTH);
+		}
+
+		try {
+			$rawResults = $this->fullTextSearchManager->search([
+				'providers' => 'all',
+				'search' => $term,
+				'size' => 15,
+				'page' => 1,
+			], $user->getUID());
+		} catch (\Throwable $e) {
+			return new JSONResponse(['suggestions' => []]);
+		}
+
+		$titles = [];
+		foreach ($rawResults as $searchResult) {
+			foreach ($searchResult->getDocuments() as $document) {
+				$title = $document->getTitle();
+				if ($document->getProviderId() === 'files' && str_starts_with($title, '.Collectifs/')) {
+					continue;
+				}
+				$shortTitle = $this->shortenTitleForSuggestion($title);
+				if ($shortTitle !== '' && !in_array($shortTitle, $titles, true)) {
+					$titles[] = $shortTitle;
+				}
+				if (count($titles) >= 8) {
+					break 2;
+				}
+			}
+		}
+
+		return new JSONResponse(['suggestions' => $titles]);
+	}
+
+	private function shortenTitleForSuggestion(string $title): string {
+		$parts = explode('/', $title);
+		$short = end($parts);
+		$withoutExt = preg_replace('/\.[a-zA-Z0-9]+$/', '', $short);
+		return $withoutExt ?? $short;
+	}
+
 	#[NoAdminRequired]
 	#[NoCSRFRequired]
 	#[UserRateLimit(limit: 60, period: 60)]
@@ -301,12 +362,19 @@ class SearchController extends Controller {
 		$requestedPage = min($requestedPage, $totalPages);
 		$pageResults = array_slice($filtered, ($requestedPage - 1) * self::PAGE_SIZE, self::PAGE_SIZE);
 
+		// La recherche par sens n'a pas de "mot exact" a mettre en avant (c'est le principe :
+		// elle matche sur le SENS, pas le mot). Au minimum, on affiche un extrait du contenu
+		// reel deja recupere pour la previsualisation, centre sur un eventuel chevauchement
+		// lexical (matchedTerms) quand il y en a un, sinon le debut du document.
 		foreach ($pageResults as &$doc) {
 			$fullContent = $this->fetchFullContent($doc['providerId'], $doc['id']);
 			if ($fullContent !== '' && empty($doc['matchedTerms'])) {
 				$doc['matchedTerms'] = $this->computeMatchedTerms($term, $doc['title'], [], $doc['tags'], $fullContent);
 			}
 			$doc['fullContent'] = $fullContent;
+			if ($fullContent !== '') {
+				$doc['excerpts'] = [$this->buildContentSnippet($fullContent, $doc['matchedTerms'])];
+			}
 		}
 		unset($doc);
 
@@ -320,6 +388,33 @@ class SearchController extends Controller {
 			'isAdmin' => $this->groupManager->isAdmin($user->getUID()),
 			'neural' => true,
 		]);
+	}
+
+	/**
+	 * Extrait de contenu pour un resultat de recherche neuronale : centre sur le premier
+	 * terme de matchedTerms trouve dans le texte (chevauchement lexical incident, meme
+	 * quand le vrai "match" est semantique), sinon les premiers caracteres du document.
+	 */
+	private function buildContentSnippet(string $fullContent, array $matchedTerms): string {
+		$maxLen = 220;
+		$lower = mb_strtolower($fullContent);
+
+		$bestPos = null;
+		foreach ($matchedTerms as $term) {
+			$pos = mb_strpos($lower, mb_strtolower($term));
+			if ($pos !== false && ($bestPos === null || $pos < $bestPos)) {
+				$bestPos = $pos;
+			}
+		}
+
+		if ($bestPos !== null) {
+			$start = max(0, $bestPos - 80);
+			$snippet = trim(mb_substr($fullContent, $start, $maxLen));
+			return ($start > 0 ? '… ' : '') . $snippet . '…';
+		}
+
+		$snippet = trim(mb_substr($fullContent, 0, $maxLen));
+		return $snippet . (mb_strlen($fullContent) > $maxLen ? '…' : '');
 	}
 
 	/**

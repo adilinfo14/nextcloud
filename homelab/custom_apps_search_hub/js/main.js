@@ -32,6 +32,11 @@
 
 	var lastData = null;
 	var debounceTimer = null;
+	var suggestDebounceTimer = null;
+	var suggestAbortController = null;
+
+	var HISTORY_KEY = 'sh-search-history';
+	var HISTORY_MAX = 10;
 
 	var PROVIDER_LABELS = { files: 'Fichiers', collectives: 'Wiki', deck: 'Deck' };
 	var TYPE_LABELS = {
@@ -106,9 +111,20 @@
 		var input = document.getElementById('sh-input');
 		var newTerm = input.value.trim();
 		if (newTerm !== state.term) {
+			// Un nouveau terme de recherche remet a plat les filtres de la recherche
+			// precedente : sans ca, un filtre choisi lors d'une recherche anterieure
+			// (ex : type=PDF, periode=24h) reste actif sur la nouvelle recherche sans
+			// aucun indice visible fort, ce qui peut donner "0 resultat" alors que les
+			// facettes (calculees hors filtre) affichent des compteurs non nuls.
 			state.page = 1;
+			state.tag = '';
+			state.collective = '';
+			state.fileType = '';
+			state.chapter = '';
+			state.period = '';
 		}
 		state.term = newTerm;
+		hideSuggestions();
 
 		if (state.term === '') {
 			lastData = null;
@@ -272,8 +288,12 @@
 
 		resultsEl.innerHTML = toolbarHtml + weightsHtml + lastData.results.map(function (r, idx) {
 			var excerpts = (r.excerpts && r.excerpts.length) ? r.excerpts : [];
+			// highlightTerms() sur les mots reellement trouves (matchedTerms), plutot que
+			// highlight() sur state.term entier : en recherche par sens, state.term peut etre
+			// une phrase complete qui ne matchera jamais litteralement dans l'extrait.
+			var highlightWords = (r.matchedTerms && r.matchedTerms.length) ? r.matchedTerms : [state.term];
 			var excerptsHtml = excerpts.map(function (ex) {
-				return '<div class="sh-result-excerpt">' + highlight(ex, state.term) + '</div>';
+				return '<div class="sh-result-excerpt">' + highlightTerms(ex, highlightWords) + '</div>';
 			}).join('');
 
 			var titleParts = r.title.split('/');
@@ -440,7 +460,7 @@
 		} else {
 			var excerpts = (result.excerpts && result.excerpts.length) ? result.excerpts : [];
 			bodyHtml = excerpts.length
-				? excerpts.map(function (ex) { return '<div class="sh-preview-excerpt">' + highlight(ex, state.term) + '</div>'; }).join('')
+				? excerpts.map(function (ex) { return '<div class="sh-preview-excerpt">' + highlightTerms(ex, terms) + '</div>'; }).join('')
 				: '<p>Aucun contenu disponible pour cet element (ex : carte Deck).</p>';
 		}
 
@@ -505,11 +525,146 @@
 		document.getElementById('sh-preview').classList.remove('open');
 	}
 
+	function getHistory() {
+		try {
+			var raw = window.localStorage.getItem(HISTORY_KEY);
+			var list = raw ? JSON.parse(raw) : [];
+			return Array.isArray(list) ? list : [];
+		} catch (e) {
+			return [];
+		}
+	}
+
+	function saveToHistory(term) {
+		if (!term) {
+			return;
+		}
+		try {
+			var list = getHistory().filter(function (t) { return t.toLowerCase() !== term.toLowerCase(); });
+			list.unshift(term);
+			list = list.slice(0, HISTORY_MAX);
+			window.localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+		} catch (e) {
+			// Stockage local indisponible (navigation privee, quota) : l'historique est
+			// juste une commodite, on echoue silencieusement plutot que de casser la recherche.
+		}
+	}
+
+	function hideSuggestions() {
+		var box = document.getElementById('sh-suggestions');
+		box.innerHTML = '';
+		box.classList.remove('open');
+		if (suggestAbortController) {
+			suggestAbortController.abort();
+			suggestAbortController = null;
+		}
+	}
+
+	function renderSuggestions(historyMatches, keywordMatches) {
+		var box = document.getElementById('sh-suggestions');
+		var items = [];
+
+		historyMatches.forEach(function (term) {
+			items.push({ label: term, type: 'history' });
+		});
+		keywordMatches.forEach(function (title) {
+			var alreadyInHistory = historyMatches.some(function (h) { return h.toLowerCase() === title.toLowerCase(); });
+			if (!alreadyInHistory) {
+				items.push({ label: title, type: 'keyword' });
+			}
+		});
+
+		if (items.length === 0) {
+			hideSuggestions();
+			return;
+		}
+
+		box.innerHTML = items.slice(0, 10).map(function (item) {
+			var icon = item.type === 'history' ? '&#8635;' : '&#128269;';
+			return '<div class="sh-suggestion-item" data-value="' + esc(item.label) + '">' +
+				'<span class="sh-suggestion-icon">' + icon + '</span>' +
+				'<span>' + esc(item.label) + '</span></div>';
+		}).join('');
+		box.classList.add('open');
+
+		Array.prototype.forEach.call(box.querySelectorAll('.sh-suggestion-item'), function (el) {
+			// mousedown (pas click) : se declenche AVANT le blur de l'input, sinon
+			// hideSuggestions() sur blur ferait disparaitre la liste avant le clic.
+			el.addEventListener('mousedown', function (ev) {
+				ev.preventDefault();
+				var value = el.getAttribute('data-value');
+				var input = document.getElementById('sh-input');
+				input.value = value;
+				hideSuggestions();
+				runSearch();
+				saveToHistory(value);
+			});
+		});
+	}
+
+	function updateSuggestions(term) {
+		var history = getHistory();
+		var historyMatches = term === ''
+			? history.slice(0, 5)
+			: history.filter(function (t) { return t.toLowerCase().indexOf(term.toLowerCase()) !== -1; }).slice(0, 5);
+
+		if (term.length < 2) {
+			renderSuggestions(historyMatches, []);
+			return;
+		}
+
+		if (suggestAbortController) {
+			suggestAbortController.abort();
+		}
+		suggestAbortController = new AbortController();
+
+		fetch(OC.generateUrl('/apps/search_hub/api/suggest') + '?term=' + encodeURIComponent(term), {
+			headers: { requesttoken: OC.requestToken },
+			signal: suggestAbortController.signal,
+		})
+			.then(function (r) { return r.json(); })
+			.then(function (data) {
+				renderSuggestions(historyMatches, (data && data.suggestions) || []);
+			})
+			.catch(function () {
+				// Requete annulee (nouvelle frappe) ou echec reseau : on garde au moins
+				// l'historique local, deja affiche de facon optimiste plus haut serait
+				// complexe ici - on se contente de ne pas casser l'UI.
+				renderSuggestions(historyMatches, []);
+			});
+	}
+
 	function init() {
 		var input = document.getElementById('sh-input');
 		input.addEventListener('input', function () {
 			clearTimeout(debounceTimer);
 			debounceTimer = setTimeout(runSearch, 350);
+
+			clearTimeout(suggestDebounceTimer);
+			suggestDebounceTimer = setTimeout(function () {
+				updateSuggestions(input.value.trim());
+			}, 150);
+		});
+
+		input.addEventListener('focus', function () {
+			updateSuggestions(input.value.trim());
+		});
+
+		input.addEventListener('keydown', function (ev) {
+			if (ev.key === 'Enter') {
+				hideSuggestions();
+				if (input.value.trim() !== '') {
+					saveToHistory(input.value.trim());
+				}
+			} else if (ev.key === 'Escape') {
+				hideSuggestions();
+			}
+		});
+
+		input.addEventListener('blur', function () {
+			// Delai court : laisse le mousedown d'une suggestion se declencher avant
+			// que la liste ne disparaisse (voir renderSuggestions()).
+			setTimeout(hideSuggestions, 150);
 		});
 
 		var neuralToggle = document.getElementById('sh-neural-toggle');

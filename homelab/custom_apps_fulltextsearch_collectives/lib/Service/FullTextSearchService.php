@@ -15,13 +15,7 @@ use OCP\IUserManager;
 use OCP\IUserSession;
 
 class FullTextSearchService {
-	/** @var array<int, array{title: string, collectiveId: ?int}>|null */
-	private static ?array $pageIndex = null;
-
-	/** @var array<int, int>|null childFileId => parentFileId */
-	private static ?array $parentOf = null;
-
-	/** @var array<int, string>|null collectiveId => slug, cache pour resolvePageTitle() */
+	/** @var array<int, string>|null collectiveId => slug, cache pour resolveTitleAndChapter() */
 	private static ?array $collectiveSlugs = null;
 
 	public function __construct(
@@ -99,24 +93,21 @@ class FullTextSearchService {
 			throw new NotFoundException('Page introuvable via PageService : ' . $fileId . ' (' . $e->getMessage() . ')');
 		}
 
-		// pathinfo($file->getName()) donnerait "Readme" pour toute page-conteneur (une page
-		// qui a des sous-pages est stockee par Collectives comme un dossier</Readme.md>) :
-		// on reutilise donc la resolution de titre de buildPageIndex(), qui applique la
-		// meme convention que OCA\Collectives\Model\PageInfo::fromFile() (titre = nom du
-		// DOSSIER pour un Readme.md non-racine).
-		$this->buildPageIndex();
-		$title = self::$pageIndex[$fileId]['title'] ?? pathinfo($file->getName(), PATHINFO_FILENAME);
+		$row = $this->loadNameAndPath($fileId);
+		[$title, $chapter] = $row !== null
+			? $this->resolveTitleAndChapter((string)$row['name'], (string)$row['path'], $collectiveId)
+			: [pathinfo($file->getName(), PATHINFO_FILENAME), null];
+
 		$content = $file->getContent();
 
 		$document->setTitle($title);
 		$document->setContent($content);
 		$document->setAccess($this->generateDocumentAccessFromFileId($fileId, $collectiveId));
 
-		// Chapitre/sous-chapitre parent (deduit de subpage_order) : expose comme metatag
-		// pour permettre a search_hub de le presenter en tant que facette de filtrage.
-		$chapterTitle = $this->getParentChapterTitle($fileId);
-		if ($chapterTitle !== null) {
-			$document->setMetaTags([$chapterTitle]);
+		// Chapitre/sous-chapitre parent : expose comme metatag pour permettre a search_hub
+		// de le presenter en tant que facette de filtrage.
+		if ($chapter !== null) {
+			$document->setMetaTags([$chapter]);
 		}
 	}
 
@@ -158,72 +149,59 @@ class FullTextSearchService {
 			return null;
 		}
 
-		return '/apps/collectives/' . rawurlencode($slug) . '?fileId=' . $fileId;
+		// L'app Collectives route sur "<slug>-<id>", jamais le slug seul (confirme en lisant
+		// OCA\Collectives\Db\Collective::getUrlPath()) : sans le "-<id>", le lien tombe sur
+		// "Collectif introuvable" cote frontend Vue. Piege trouve tardivement car jamais
+		// clique reellement avant (seulement verifie via reflexion/tests automatises).
+		return '/apps/collectives/' . rawurlencode($slug . '-' . $collectiveId) . '?fileId=' . $fileId;
 	}
 
-	/**
-	 * Construit (une seule fois par requete/job) l'index de toutes les pages Collectives :
-	 * titre + collective, et la relation enfant -> parent deduite de subpage_order (seul
-	 * champ qui porte la hierarchie, puisqu'il n'y a pas de colonne parent_id en base).
-	 */
-	private function buildPageIndex(): void {
-		if (self::$pageIndex !== null) {
-			return;
-		}
-
-		self::$pageIndex = [];
-		self::$parentOf = [];
-
+	private function loadNameAndPath(int $fileId): ?array {
 		$qb = $this->dbConnection->getQueryBuilder();
-		$qb->select('cp.file_id', 'cp.subpage_order', 'fc.name', 'fc.path')
-			->from('collectives_pages', 'cp')
-			->innerJoin('cp', 'filecache', 'fc', $qb->expr()->eq('cp.file_id', 'fc.fileid'))
-			->where($qb->expr()->isNull('cp.trash_timestamp'));
-
+		$qb->select('name', 'path')
+			->from('filecache')
+			->where($qb->expr()->eq('fileid', $qb->createNamedParameter($fileId, \PDO::PARAM_INT)));
 		$result = $qb->executeQuery();
-		while ($row = $result->fetch()) {
-			$fileId = (int)$row['file_id'];
-			$collectiveId = $this->extractCollectiveIdFromPath($row['path']);
-			self::$pageIndex[$fileId] = [
-				'title' => $this->resolvePageTitle((string)$row['name'], (string)$row['path'], $collectiveId),
-				'collectiveId' => $collectiveId,
-			];
-
-			$order = json_decode((string)$row['subpage_order'], true);
-			if (is_array($order)) {
-				foreach ($order as $childFileId) {
-					self::$parentOf[(int)$childFileId] = $fileId;
-				}
-			}
-		}
+		$row = $result->fetch();
 		$result->closeCursor();
+
+		return $row !== false ? $row : null;
 	}
 
 	/**
-	 * Reproduit la convention de titre de l'app Collectives elle-meme
-	 * (OCA\Collectives\Model\PageInfo::fromFile) : une page qui a des sous-pages est
-	 * stockee physiquement comme un DOSSIER contenant un fichier "Readme.md" - le vrai
-	 * titre affiche par Collectives est alors celui du dossier, jamais "Readme". Sans
-	 * cette regle, toute page-chapitre/sous-chapitre apparaitrait dans la recherche (et
-	 * dans la facette "chapitre") sous le nom generique et inutilisable "Readme".
+	 * Titre affiche et chapitre/sous-chapitre parent d'une page, deduits UNIQUEMENT du
+	 * chemin physique du fichier - PAS de subpage_order (colonne cosmetique qui ne porte
+	 * qu'un indice d'ordre d'affichage, pas la relation parent/enfant : verifie en base,
+	 * la plupart des pages ne referencent jamais leurs propres enfants dans ce champ).
+	 * La hierarchie reelle de Collectives EST la structure de dossiers, un point c'est
+	 * tout : le dossier contenant directement le fichier EST son chapitre.
+	 *
+	 * Convention de titre reprise de OCA\Collectives\Model\PageInfo::fromFile() : une page
+	 * qui a des sous-pages est stockee comme un dossier contenant "Readme.md" - le titre
+	 * reel est alors celui du dossier, jamais "Readme".
+	 *
+	 * @return array{0: string, 1: ?string} [titre, chapitre-parent-ou-null]
 	 */
-	private function resolvePageTitle(string $fileName, string $path, ?int $collectiveId): string {
-		if ($fileName !== 'Readme.md') {
-			return pathinfo($fileName, PATHINFO_FILENAME);
+	private function resolveTitleAndChapter(string $fileName, string $path, ?int $collectiveId): array {
+		if (!preg_match('#/collectives/\d+/(.*)$#', $path, $m)) {
+			return [pathinfo($fileName, PATHINFO_FILENAME), null];
 		}
 
-		if (preg_match('#/collectives/\d+/Readme\.md$#', $path)) {
-			// Page d'accueil de la collective elle-meme : pas de dossier parent
-			// pertinent, on retombe sur le slug (meme convention que le lien de la
-			// collective ailleurs dans cet apps, cf. getPageLink()/extractCollectiveFromLink()).
-			return $this->getCollectiveSlugCached($collectiveId) ?? 'Accueil';
+		$segments = explode('/', $m[1]);
+		array_pop($segments); // retire le nom du fichier lui-meme : ne reste que les dossiers
+
+		if ($fileName === 'Readme.md') {
+			if (empty($segments)) {
+				// Page d'accueil de la collective elle-meme : pas de dossier, pas de chapitre.
+				return [$this->getCollectiveSlugCached($collectiveId) ?? 'Accueil', null];
+			}
+			$ownTitle = array_pop($segments); // dernier dossier = nom de cette page-conteneur
+			$chapter = empty($segments) ? null : end($segments);
+			return [$ownTitle, $chapter];
 		}
 
-		$segments = explode('/', rtrim($path, '/'));
-		array_pop($segments);
-		$folderName = end($segments);
-
-		return $folderName !== false && $folderName !== '' ? $folderName : 'Chapitre';
+		$chapter = empty($segments) ? null : end($segments);
+		return [pathinfo($fileName, PATHINFO_FILENAME), $chapter];
 	}
 
 	private function getCollectiveSlugCached(?int $collectiveId): ?string {
@@ -244,21 +222,6 @@ class FullTextSearchService {
 
 		$slug = self::$collectiveSlugs[$collectiveId] ?? null;
 		return $slug !== null && $slug !== '' ? rawurldecode($slug) : null;
-	}
-
-	/**
-	 * Titre de la page parente directe (chapitre ou sous-chapitre) d'une page, ou null
-	 * si la page est elle-meme une page racine (pas de parent dans subpage_order).
-	 */
-	public function getParentChapterTitle(int $fileId): ?string {
-		$this->buildPageIndex();
-
-		$parentId = self::$parentOf[$fileId] ?? null;
-		if ($parentId === null) {
-			return null;
-		}
-
-		return self::$pageIndex[$parentId]['title'] ?? null;
 	}
 
 	private function getCollectiveIdsForUser(string $userId): array {

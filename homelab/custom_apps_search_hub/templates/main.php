@@ -5,7 +5,10 @@
 <div id="content" class="app-search-hub">
 	<div id="sh-app">
 		<div id="sh-searchbar">
-			<input type="text" id="sh-input" placeholder="Rechercher dans les fichiers, le wiki, Deck..." autocomplete="off" />
+			<div id="sh-input-wrap">
+				<input type="text" id="sh-input" placeholder="Rechercher dans les fichiers, le wiki, Deck..." autocomplete="off" />
+				<div id="sh-suggestions"></div>
+			</div>
 			<span id="sh-neural-toggle" title="Recherche par sens (similarite semantique plutot que mot-cle exact)">Recherche par sens</span>
 		</div>
 
