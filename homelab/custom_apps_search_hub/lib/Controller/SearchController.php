@@ -455,7 +455,9 @@ class SearchController extends Controller {
 		$tags = [];
 		$collectives = [];
 		$fileTypes = [];
-		$chapters = [];
+		// Chapitres regroupes PAR collective (et non en liste plate) : sinon les chapitres
+		// de plusieurs collectives se melangent sans distinction possible pour l'utilisateur.
+		$chaptersByCollective = [];
 		$periods = ['24h' => 0, '7j' => 0, '30j' => 0];
 		$now = time();
 		$periodLimits = ['24h' => 86400, '7j' => 604800, '30j' => 2592000];
@@ -474,7 +476,9 @@ class SearchController extends Controller {
 			$fileTypes[$doc['fileType']] = ($fileTypes[$doc['fileType']] ?? 0) + 1;
 
 			if (!empty($doc['chapter'])) {
-				$chapters[$doc['chapter']] = ($chapters[$doc['chapter']] ?? 0) + 1;
+				$collectiveKey = $doc['collective'] ?? '';
+				$chaptersByCollective[$collectiveKey][$doc['chapter']] =
+					($chaptersByCollective[$collectiveKey][$doc['chapter']] ?? 0) + 1;
 			}
 
 			if ($doc['modifiedTime'] > 0) {
@@ -489,20 +493,23 @@ class SearchController extends Controller {
 		arsort($tags);
 		arsort($collectives);
 		arsort($fileTypes);
-		arsort($chapters);
+		foreach ($chaptersByCollective as &$chaptersForCollective) {
+			arsort($chaptersForCollective);
+		}
+		unset($chaptersForCollective);
 
 		return [
 			'providers' => $providers,
 			'tags' => $tags,
 			'collectives' => $collectives,
 			'fileTypes' => $fileTypes,
-			'chapters' => $chapters,
+			'chaptersByCollective' => $chaptersByCollective,
 			'periods' => $periods,
 		];
 	}
 
 	private function emptyFacets(): array {
-		return ['providers' => [], 'tags' => [], 'collectives' => [], 'fileTypes' => [], 'chapters' => [], 'periods' => ['24h' => 0, '7j' => 0, '30j' => 0]];
+		return ['providers' => [], 'tags' => [], 'collectives' => [], 'fileTypes' => [], 'chaptersByCollective' => [], 'periods' => ['24h' => 0, '7j' => 0, '30j' => 0]];
 	}
 
 	private function applyFilters(array $documents): array {

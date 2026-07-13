@@ -97,6 +97,18 @@
 	font-weight: 600;
 }
 
+.sh-filter-suboption {
+	padding-inline-start: 16px;
+	font-size: 12px;
+	color: var(--color-text-maxcontrast);
+	border-inline-start: 2px solid var(--color-border);
+	margin-inline-start: 4px;
+}
+
+.sh-filter-suboption.active {
+	border-inline-start-color: var(--color-primary-element);
+}
+
 .sh-filter-option .sh-count {
 	color: var(--color-text-maxcontrast);
 	font-size: 12px;

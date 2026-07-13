@@ -192,6 +192,27 @@
 		return html;
 	}
 
+	function renderCollectiveTree(collectives, chaptersByCollective) {
+		if (!collectives || Object.keys(collectives).length === 0) {
+			return '';
+		}
+		var html = '<div class="sh-filter-group"><h4>Collective</h4>';
+		Object.keys(collectives).forEach(function (key) {
+			var active = state.collective === key ? ' active' : '';
+			html += '<div class="sh-filter-option' + active + '" data-key="collective" data-value="' + esc(key) + '">' +
+				'<span>' + esc(key) + '</span><span class="sh-count">' + collectives[key] + '</span></div>';
+
+			var chapters = (chaptersByCollective && chaptersByCollective[key]) || {};
+			Object.keys(chapters).forEach(function (chapterKey) {
+				var chapterActive = state.chapter === chapterKey ? ' active' : '';
+				html += '<div class="sh-filter-option sh-filter-suboption' + chapterActive + '" data-key="chapter" data-value="' + esc(chapterKey) + '">' +
+					'<span>' + esc(chapterKey) + '</span><span class="sh-count">' + chapters[chapterKey] + '</span></div>';
+			});
+		});
+		html += '</div>';
+		return html;
+	}
+
 	function renderFilters() {
 		var filtersEl = document.getElementById('sh-filters');
 		if (!lastData) {
@@ -202,9 +223,8 @@
 
 		var html = '';
 		html += renderFilterGroup('Etiquettes', facets.tags, null, 'tag');
-		html += renderFilterGroup('Collective', facets.collectives, null, 'collective');
+		html += renderCollectiveTree(facets.collectives, facets.chaptersByCollective);
 		html += renderFilterGroup('Type de document', facets.fileTypes, TYPE_LABELS, 'fileType');
-		html += renderFilterGroup('Chapitre / sous-chapitre', facets.chapters, null, 'chapter');
 		html += renderFilterGroup('Periode', facets.periods, PERIOD_LABELS, 'period');
 
 		filtersEl.innerHTML = html;
