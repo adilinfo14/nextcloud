@@ -93,6 +93,7 @@ class SearchController extends Controller {
 				$originalLink = $document->getLink();
 				$title = $document->getTitle();
 				$tags = $document->getTags();
+				$metaTags = $document->getMetaTags();
 				$excerptTexts = array_slice(array_map(static fn ($e) => $e['excerpt'], $excerpts), 0, 3);
 
 				$documents[] = [
@@ -108,6 +109,10 @@ class SearchController extends Controller {
 					'titleMatch' => !empty($this->computeMatchedTerms($term, $title, [], [])),
 					'collective' => $this->extractCollectiveFromLink($document->getProviderId(), $originalLink),
 					'fileType' => $this->extractFileType($document->getProviderId(), $title),
+					// Chapitre/sous-chapitre parent d'une page Collectives (voir
+					// fulltextsearch_collectives::getParentChapterTitle) ; absent pour
+					// les autres providers ou pour une page racine sans parent.
+					'chapter' => $metaTags[0] ?? null,
 				];
 			}
 		}
@@ -373,6 +378,7 @@ class SearchController extends Controller {
 		$tags = [];
 		$collectives = [];
 		$fileTypes = [];
+		$chapters = [];
 		$periods = ['24h' => 0, '7j' => 0, '30j' => 0];
 		$now = time();
 		$periodLimits = ['24h' => 86400, '7j' => 604800, '30j' => 2592000];
@@ -390,6 +396,10 @@ class SearchController extends Controller {
 
 			$fileTypes[$doc['fileType']] = ($fileTypes[$doc['fileType']] ?? 0) + 1;
 
+			if (!empty($doc['chapter'])) {
+				$chapters[$doc['chapter']] = ($chapters[$doc['chapter']] ?? 0) + 1;
+			}
+
 			if ($doc['modifiedTime'] > 0) {
 				foreach ($periodLimits as $period => $limit) {
 					if (($now - $doc['modifiedTime']) <= $limit) {
@@ -402,18 +412,20 @@ class SearchController extends Controller {
 		arsort($tags);
 		arsort($collectives);
 		arsort($fileTypes);
+		arsort($chapters);
 
 		return [
 			'providers' => $providers,
 			'tags' => $tags,
 			'collectives' => $collectives,
 			'fileTypes' => $fileTypes,
+			'chapters' => $chapters,
 			'periods' => $periods,
 		];
 	}
 
 	private function emptyFacets(): array {
-		return ['providers' => [], 'tags' => [], 'collectives' => [], 'fileTypes' => [], 'periods' => ['24h' => 0, '7j' => 0, '30j' => 0]];
+		return ['providers' => [], 'tags' => [], 'collectives' => [], 'fileTypes' => [], 'chapters' => [], 'periods' => ['24h' => 0, '7j' => 0, '30j' => 0]];
 	}
 
 	private function applyFilters(array $documents): array {
@@ -421,9 +433,10 @@ class SearchController extends Controller {
 		$tag = (string)$this->request->getParam('tag', '');
 		$collective = (string)$this->request->getParam('collective', '');
 		$fileType = (string)$this->request->getParam('fileType', '');
+		$chapter = (string)$this->request->getParam('chapter', '');
 		$period = (string)$this->request->getParam('period', '');
 
-		return array_values(array_filter($documents, function ($doc) use ($provider, $tag, $collective, $fileType, $period) {
+		return array_values(array_filter($documents, function ($doc) use ($provider, $tag, $collective, $fileType, $chapter, $period) {
 			if ($provider !== '' && $doc['providerId'] !== $provider) {
 				return false;
 			}
@@ -434,6 +447,9 @@ class SearchController extends Controller {
 				return false;
 			}
 			if ($fileType !== '' && $doc['fileType'] !== $fileType) {
+				return false;
+			}
+			if ($chapter !== '' && $doc['chapter'] !== $chapter) {
 				return false;
 			}
 			if ($period !== '' && $doc['modifiedTime'] > 0) {

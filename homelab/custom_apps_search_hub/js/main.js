@@ -7,6 +7,7 @@
 		tag: '',
 		collective: '',
 		fileType: '',
+		chapter: '',
 		period: '',
 		sort: 'relevance',
 		weights: { wRelevance: 50, wTitle: 20, wCoverage: 20, wRecency: 10 },
@@ -117,6 +118,7 @@
 			tag: state.tag,
 			collective: state.collective,
 			fileType: state.fileType,
+			chapter: state.chapter,
 			period: state.period,
 			sort: state.sort,
 			wRelevance: state.weights.wRelevance,
@@ -195,6 +197,7 @@
 		html += renderFilterGroup('Etiquettes', facets.tags, null, 'tag');
 		html += renderFilterGroup('Collective', facets.collectives, null, 'collective');
 		html += renderFilterGroup('Type de document', facets.fileTypes, TYPE_LABELS, 'fileType');
+		html += renderFilterGroup('Chapitre / sous-chapitre', facets.chapters, null, 'chapter');
 		html += renderFilterGroup('Periode', facets.periods, PERIOD_LABELS, 'period');
 
 		filtersEl.innerHTML = html;
@@ -248,6 +251,9 @@
 			meta.push('<span class="sh-badge">' + esc(PROVIDER_LABELS[r.providerId] || r.providerId) + '</span>');
 			if (r.collective) {
 				meta.push(esc(r.collective));
+			}
+			if (r.chapter) {
+				meta.push(esc(r.chapter));
 			}
 			if (r.modifiedTime) {
 				meta.push(fmtDate(r.modifiedTime));
