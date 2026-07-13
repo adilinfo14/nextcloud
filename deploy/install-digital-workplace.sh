@@ -133,6 +133,16 @@ if [ "$ENABLE_PUSH" = "o" ] || [ "$ENABLE_PUSH" = "O" ]; then
     PUSH_DOMAIN="$REPLY_VAL"
 fi
 
+ask "Activer la recherche plein texte avancee : Elasticsearch + OCR des PDF/images scannes + module 'Recherche+' (onglets, filtres, extraits surlignes) ? (o/n)" "n"
+ENABLE_SEARCH="$REPLY_VAL"
+
+OCR_LANG=""
+if [ "$ENABLE_SEARCH" = "o" ] || [ "$ENABLE_SEARCH" = "O" ]; then
+    warn "Necessite 'git' installe sur ce serveur (pour recuperer le code des modules) et au moins 2 Go de RAM supplementaires pour Elasticsearch."
+    ask "Langue(s) OCR, separees par une virgule (ex: fra,eng)" "fra,eng"
+    OCR_LANG="$REPLY_VAL"
+fi
+
 ask "Code pays par défaut pour les numéros de téléphone (ISO 3166-1, ex: FR, MA, US)" "FR"
 PHONE_REGION="$REPLY_VAL"
 
@@ -150,6 +160,7 @@ echo "  Thème sombre forcé: $FORCE_DARK"
 echo "  Région téléphone  : $PHONE_REGION"
 echo "  Client Push       : ${PUSH_DOMAIN:-non}"
 echo "  Whiteboard        : ${WHITEBOARD_DOMAIN:-non}"
+echo "  Recherche+ (ES)   : ${ENABLE_SEARCH}"
 echo "  Répertoire        : $INSTALL_DIR"
 echo
 read -r -p "Continuer ? (o/n) : " CONFIRM
@@ -164,6 +175,26 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
+
+# L'image Nextcloud standard ne sait pas faire d'OCR (Tesseract absent). Si la
+# recherche avancee est demandee, on construit une image maison qui ajoute
+# Tesseract + Ghostscript (necessaire pour rasteriser les PDF avant OCR) par
+# dessus l'image officielle, plutot que d'utiliser l'image telle quelle.
+if [ "$ENABLE_SEARCH" = "o" ] || [ "$ENABLE_SEARCH" = "O" ]; then
+    mkdir -p nextcloud-image
+    cat > nextcloud-image/Dockerfile <<'EOF'
+FROM nextcloud:latest
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng ghostscript && \
+    rm -rf /var/lib/apt/lists/*
+EOF
+    APP_IMAGE_LINES="    build: ./nextcloud-image
+    image: nextcloud-tesseract:local"
+    ok "Dockerfile OCR genere (nextcloud-image/Dockerfile)"
+else
+    APP_IMAGE_LINES="    image: nextcloud"
+fi
 
 info "Génération du docker-compose.yml..."
 cat > docker-compose.yml <<EOF
@@ -186,7 +217,7 @@ services:
 
   app:
     container_name: nextcloud
-    image: nextcloud
+${APP_IMAGE_LINES}
     restart: always
     ports:
       - "8080:80"
@@ -244,12 +275,34 @@ EOF
     ok "Service whiteboard ajouté au docker-compose.yml"
 fi
 
+if [ "$ENABLE_SEARCH" = "o" ] || [ "$ENABLE_SEARCH" = "O" ]; then
+    cat >> docker-compose.yml <<EOF
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: elasticsearch
+    restart: always
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+EOF
+    ok "Service elasticsearch ajouté au docker-compose.yml"
+fi
+
 cat >> docker-compose.yml <<EOF
 
 volumes:
   db-data:
   nc-data:
 EOF
+if [ "$ENABLE_SEARCH" = "o" ] || [ "$ENABLE_SEARCH" = "O" ]; then
+    cat >> docker-compose.yml <<EOF
+  es-data:
+EOF
+fi
 ok "docker-compose.yml généré dans $INSTALL_DIR"
 warn "NOTE : ce compose expose Nextcloud sur le port 8080 de l'hôte en HTTP. Mets un reverse proxy (nginx/Caddy/Traefik) devant avec un certificat HTTPS pour le domaine '$DOMAIN' avant d'exposer publiquement — ce script ne gère pas cette partie (dépend trop de l'infra existante du serveur cible)."
 if [ -n "$PUSH_DOMAIN" ] || [ -n "$WHITEBOARD_DOMAIN" ]; then
@@ -271,6 +324,9 @@ info "Démarrage des conteneurs..."
 INITIAL_SERVICES="db redis app"
 if [ -n "$WHITEBOARD_DOMAIN" ]; then
     INITIAL_SERVICES="$INITIAL_SERVICES whiteboard"
+fi
+if [ "$ENABLE_SEARCH" = "o" ] || [ "$ENABLE_SEARCH" = "O" ]; then
+    INITIAL_SERVICES="$INITIAL_SERVICES elasticsearch"
 fi
 docker compose up -d $INITIAL_SERVICES
 
@@ -300,7 +356,12 @@ occ config:system:set redis port --value=6379 --type=integer
 info "Activation du cron système (mode background jobs)..."
 occ background:cron
 ok "Pense à ajouter cette ligne à la crontab de l'hôte (pas fait automatiquement par ce script) :"
-echo "    */5 * * * * docker exec -u www-data nextcloud php -f /var/www/html/cron.php >> $INSTALL_DIR/cron.log 2>&1"
+if [ "$ENABLE_SEARCH" = "o" ] || [ "$ENABLE_SEARCH" = "O" ]; then
+    echo "    */1 * * * * docker exec -u www-data nextcloud php -f /var/www/html/cron.php >> $INSTALL_DIR/cron.log 2>&1"
+    warn "Intervalle d'1 minute recommandé ici car la recherche plein texte + l'Assistant IA (si activé plus tard) sont traités par ce même cron — au dela de 5 minutes, l'attente perçue devient inconfortable pour les utilisateurs."
+else
+    echo "    */5 * * * * docker exec -u www-data nextcloud php -f /var/www/html/cron.php >> $INSTALL_DIR/cron.log 2>&1"
+fi
 
 info "Corrections de la page 'Avertissements de sécurité & configuration'..."
 occ config:system:set maintenance_window_start --value=3 --type=integer
@@ -359,6 +420,106 @@ if [ -n "$PUSH_DOMAIN" ]; then
     else
         warn "Configuration de Client Push incomplète — relancer 'occ notify_push:setup https://$PUSH_DOMAIN' une fois le reverse proxy de ce domaine en place."
     fi
+fi
+
+if [ "$ENABLE_SEARCH" = "o" ] || [ "$ENABLE_SEARCH" = "O" ]; then
+    info "Attente qu'Elasticsearch soit pret (peut prendre 1 minute)..."
+    TRIES=0
+    until docker exec nextcloud curl -s -o /dev/null -w '%{http_code}' http://elasticsearch:9200 2>/dev/null | grep -q "200"; do
+        TRIES=$((TRIES+1))
+        if [ "$TRIES" -gt 30 ]; then
+            warn "Elasticsearch ne repond pas apres 2,5 minutes — la suite de la configuration recherche va probablement echouer. Verifier 'docker logs elasticsearch'."
+            break
+        fi
+        sleep 5
+    done
+    ok "Elasticsearch pret."
+
+    info "Installation des apps de recherche plein texte..."
+    install_app "fulltextsearch"
+    install_app "fulltextsearch_elasticsearch"
+    install_app "files_fulltextsearch"
+    install_app "files_fulltextsearch_tesseract"
+
+    info "Configuration d'Elasticsearch..."
+    ES_INDEX_NAME="nextcloud_$(echo "$ORG_NAME" | tr '[:upper:] ' '[:lower:]_' | tr -cd 'a-z0-9_')"
+    [ -z "$ES_INDEX_NAME" ] || [ "$ES_INDEX_NAME" = "nextcloud_" ] && ES_INDEX_NAME="nextcloud_workplace"
+    occ config:app:set fulltextsearch_elasticsearch elastic_host --value='http://elasticsearch:9200'
+    occ config:app:set fulltextsearch_elasticsearch elastic_index --value="$ES_INDEX_NAME"
+    occ config:app:set fulltextsearch search_platform --value='OCA\FullTextSearch_Elasticsearch\Platform\ElasticSearchPlatform'
+    occ config:app:set fulltextsearch app_navigation --value=true --type=boolean
+    occ config:app:set files_fulltextsearch files_group_folders --value=1 --type=boolean
+    ok "Elasticsearch configuré (index '$ES_INDEX_NAME')."
+
+    info "Configuration de l'OCR (Tesseract)..."
+    occ config:app:set files_fulltextsearch_tesseract tesseract_enabled --value=1
+    occ config:app:set files_fulltextsearch_tesseract tesseract_pdf --value=1
+    occ config:app:set files_fulltextsearch_tesseract tesseract_lang --value="$OCR_LANG"
+    # Plafond de pages OCR par PDF : sans ca, un document tres volumineux (livre,
+    # rapport de plusieurs centaines de pages) peut a lui seul depasser le budget
+    # temps interne de Nextcloud et interrompre toute la reindexation en cours
+    # (verifie en conditions reelles - un PDF de 545 pages a stoppe le processus).
+    occ config:app:set files_fulltextsearch_tesseract tesseract_pdf_limit --value='20'
+
+    info "Application du correctif connu sur l'app OCR (bug d'incompatibilite de version dans le package Nextcloud lui-meme)..."
+    docker cp /var/www/html/custom_apps/files_fulltextsearch_tesseract/lib/Service/TesseractService.php /tmp/tesseract-service-backup.php 2>/dev/null || true
+    docker exec nextcloud python3 - <<'PYEOF' 2>/dev/null || warn "Patch OCR : application echouee ou deja appliquee (non bloquant, voir la doc 'Patchs fragiles')"
+path = '/var/www/html/custom_apps/files_fulltextsearch_tesseract/lib/Service/TesseractService.php'
+with open(path) as f:
+    content = f.read()
+
+replacements = [
+    ("$pages = $pdf->getNumberOfPages();", "$pages = $pdf->pageCount();"),
+    ("$pdf->setPage($i);", "$pdf->selectPage($i);"),
+]
+for old, new in replacements:
+    content = content.replace(old, new)
+
+old_save = """				$this->logger->debug('saving the current page as image', ['tmpPath' => $tmpPath]);
+				$pdf->saveImage($tmpPath);
+
+				$content .= $this->ocrFileFromPath($tmpPath);
+			} catch (PageDoesNotExist $e) {
+			}"""
+new_save = """				$this->logger->debug('saving the current page as image', ['tmpPath' => $tmpPath]);
+				$savedPaths = $pdf->save($tmpPath);
+				$actualPath = $savedPaths[0] ?? $tmpPath;
+
+				$content .= $this->ocrFileFromPath($actualPath);
+
+				if ($actualPath !== $tmpPath && file_exists($actualPath)) {
+					@unlink($actualPath);
+				}
+			} catch (PageDoesNotExist $e) {
+			}"""
+if old_save in content:
+    content = content.replace(old_save, new_save)
+else:
+    raise SystemExit(1)
+
+with open(path, 'w') as f:
+    f.write(content)
+print('patched')
+PYEOF
+    ok "Correctif OCR appliqué (ou déjà à jour)."
+
+    info "Récupération et déploiement des modules 'Recherche+' et connecteur Collectives..."
+    TMP_REPO=$(mktemp -d)
+    if git clone --depth 1 https://github.com/adilinfo14/nextcloud.git "$TMP_REPO" >/dev/null 2>&1; then
+        docker cp "$TMP_REPO/homelab/custom_apps_search_hub" nextcloud:/var/www/html/custom_apps/search_hub
+        docker cp "$TMP_REPO/homelab/custom_apps_fulltextsearch_collectives" nextcloud:/var/www/html/custom_apps/fulltextsearch_collectives
+        docker exec nextcloud chown -R www-data:www-data /var/www/html/custom_apps/search_hub /var/www/html/custom_apps/fulltextsearch_collectives
+        occ app:enable search_hub
+        occ app:enable fulltextsearch_collectives
+        ok "Modules 'Recherche+' et connecteur Collectives installés et activés."
+    else
+        warn "Echec de récupération des modules (git indisponible ou réseau) — Elasticsearch/OCR sont configurés mais l'interface 'Recherche+' n'est pas installée. Relancer manuellement : git clone https://github.com/adilinfo14/nextcloud puis copier homelab/custom_apps_search_hub et homelab/custom_apps_fulltextsearch_collectives dans custom_apps/."
+    fi
+    rm -rf "$TMP_REPO"
+
+    info "Lancement de l'indexation initiale en arrière-plan (peut prendre plusieurs minutes selon le volume de données)..."
+    docker exec -u www-data nextcloud sh -c "nohup php occ fulltextsearch:index --no-interaction > /tmp/fulltextsearch-initial-index.log 2>&1 &"
+    ok "Indexation lancée (log dans le conteneur : /tmp/fulltextsearch-initial-index.log). Le cron reprendra ensuite les fichiers ajoutés au fil de l'eau."
 fi
 
 # ----------------------------------------------------------------------------
@@ -438,5 +599,11 @@ fi
 echo "  5. Configurer les groupes/équipes clients (voir doc fournie séparément)"
 echo "  6. Pour Talk en visio multi-participants fiable : prévoir un serveur TURN + serveur de signalisation"
 echo "     (non générique d'un client à l'autre, dépend de la topologie réseau — cf. README du dépôt)"
+if [ "$ENABLE_SEARCH" = "o" ] || [ "$ENABLE_SEARCH" = "O" ]; then
+    echo "  7. Recherche+ : vérifier l'indexation initiale (Administration > Recherche+, ou 'docker exec nextcloud cat /tmp/fulltextsearch-initial-index.log') — sur un volume important de données, ça peut encore tourner plusieurs minutes après la fin de ce script."
+    echo "     Prévoir au moins 2 Go de RAM dédiés à Elasticsearch en production (ES_JAVA_OPTS déjà réglé à 1 Go, à ajuster dans docker-compose.yml si besoin)."
+fi
+echo
+warn "Section recherche/Elasticsearch de ce script : construite le 2026-07-13, PAS ENCORE testée en conditions réelles sur une VM externe (contrairement au reste de ce script, validé sur une vraie installation). Tester d'abord sur un environnement non critique avant un déploiement client."
 echo
 ok "Script terminé."
