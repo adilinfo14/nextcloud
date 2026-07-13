@@ -10,6 +10,7 @@
 		chapter: '',
 		period: '',
 		sort: 'relevance',
+		page: 1,
 		weights: { wRelevance: 50, wTitle: 20, wCoverage: 20, wRecency: 10 },
 	};
 
@@ -102,7 +103,11 @@
 
 	function runSearch() {
 		var input = document.getElementById('sh-input');
-		state.term = input.value.trim();
+		var newTerm = input.value.trim();
+		if (newTerm !== state.term) {
+			state.page = 1;
+		}
+		state.term = newTerm;
 
 		if (state.term === '') {
 			lastData = null;
@@ -121,6 +126,7 @@
 			chapter: state.chapter,
 			period: state.period,
 			sort: state.sort,
+			page: state.page,
 			wRelevance: state.weights.wRelevance,
 			wTitle: state.weights.wTitle,
 			wCoverage: state.weights.wCoverage,
@@ -165,6 +171,7 @@
 		Array.prototype.forEach.call(tabsEl.querySelectorAll('.sh-tab'), function (el) {
 			el.addEventListener('click', function () {
 				state.provider = el.getAttribute('data-provider');
+				state.page = 1;
 				runSearch();
 			});
 		});
@@ -207,6 +214,7 @@
 				var key = el.getAttribute('data-key');
 				var value = el.getAttribute('data-value');
 				state[key] = (state[key] === value) ? '' : value;
+				state.page = 1;
 				runSearch();
 			});
 		});
@@ -274,6 +282,8 @@
 				'</div>';
 		}).join('');
 
+		resultsEl.insertAdjacentHTML('beforeend', renderPagination());
+
 		Array.prototype.forEach.call(resultsEl.querySelectorAll('.sh-preview-btn'), function (el) {
 			el.addEventListener('click', function () {
 				var idx = parseInt(el.getAttribute('data-idx'), 10);
@@ -283,6 +293,43 @@
 
 		bindSortSelect();
 		bindWeightInputs();
+		bindPagination();
+	}
+
+	function renderPagination() {
+		var totalPages = lastData.totalPages || 1;
+		if (totalPages <= 1) {
+			return '';
+		}
+		var page = lastData.page || 1;
+		return '<div id="sh-pagination">' +
+			'<span class="sh-pagination-btn' + (page <= 1 ? ' sh-disabled' : '') + '" id="sh-page-prev">&lsaquo; Precedent</span>' +
+			'<span class="sh-pagination-count">Page ' + page + ' / ' + totalPages + '</span>' +
+			'<span class="sh-pagination-btn' + (page >= totalPages ? ' sh-disabled' : '') + '" id="sh-page-next">Suivant &rsaquo;</span>' +
+			'</div>';
+	}
+
+	function bindPagination() {
+		var prevEl = document.getElementById('sh-page-prev');
+		var nextEl = document.getElementById('sh-page-next');
+		var totalPages = lastData.totalPages || 1;
+
+		if (prevEl) {
+			prevEl.addEventListener('click', function () {
+				if (state.page > 1) {
+					state.page -= 1;
+					runSearch();
+				}
+			});
+		}
+		if (nextEl) {
+			nextEl.addEventListener('click', function () {
+				if (state.page < totalPages) {
+					state.page += 1;
+					runSearch();
+				}
+			});
+		}
 	}
 
 	function bindSortSelect() {
@@ -290,6 +337,7 @@
 		if (sortEl) {
 			sortEl.addEventListener('change', function () {
 				state.sort = sortEl.value;
+				state.page = 1;
 				runSearch();
 			});
 		}

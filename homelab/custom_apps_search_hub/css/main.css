@@ -1,3 +1,13 @@
+/* Le coeur de Nextcloud applique "overflow: clip" + une hauteur fixe sur #content
+   (var(--body-height)) : chaque app Vue gere son propre scroll interne, ce que notre
+   template brut ne fait pas nativement. Sans ce correctif, tout resultat au-dela de
+   la hauteur visible est purement inaccessible (pas de scrollbar du tout, "clip" est
+   plus strict que "hidden"). Le selectionneur #content.app-search-hub a une
+   specificite superieure a la regle coeur #content seule, donc gagne sans !important. */
+#content.app-search-hub {
+	overflow-y: auto;
+}
+
 #sh-app {
 	padding: 20px 30px;
 	max-width: 1200px;
@@ -195,6 +205,37 @@
 	align-items: center;
 	margin-top: 8px;
 	flex-wrap: wrap;
+}
+
+#sh-pagination {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	gap: 18px;
+	padding: 20px 0;
+	font-size: 13px;
+}
+
+.sh-pagination-btn {
+	cursor: pointer;
+	color: var(--color-primary-element);
+	font-weight: 600;
+}
+
+.sh-pagination-btn:hover {
+	text-decoration: underline;
+}
+
+.sh-pagination-btn.sh-disabled {
+	color: var(--color-text-maxcontrast);
+	opacity: 0.4;
+	cursor: default;
+	pointer-events: none;
+	text-decoration: none;
+}
+
+.sh-pagination-count {
+	color: var(--color-text-maxcontrast);
 }
 
 .sh-result-matched {

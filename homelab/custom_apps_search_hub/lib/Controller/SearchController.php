@@ -27,6 +27,8 @@ class SearchController extends Controller {
 	];
 
 	private const MAX_TERM_LENGTH = 300;
+	private const PAGE_SIZE = 60;
+	private const RAW_FETCH_SIZE = 500;
 
 	public function __construct(
 		string $appName,
@@ -58,7 +60,7 @@ class SearchController extends Controller {
 
 		$term = trim((string)$this->request->getParam('term', ''));
 		if ($term === '') {
-			return new JSONResponse(['results' => [], 'facets' => $this->emptyFacets(), 'total' => 0]);
+			return new JSONResponse(['results' => [], 'facets' => $this->emptyFacets(), 'total' => 0, 'page' => 1, 'totalPages' => 1]);
 		}
 		if (mb_strlen($term) > self::MAX_TERM_LENGTH) {
 			$term = mb_substr($term, 0, self::MAX_TERM_LENGTH);
@@ -72,7 +74,7 @@ class SearchController extends Controller {
 			$rawResults = $this->fullTextSearchManager->search([
 				'providers' => 'all',
 				'search' => $term,
-				'size' => 150,
+				'size' => self::RAW_FETCH_SIZE,
 				'page' => 1,
 			], $user->getUID());
 		} catch (\Throwable $e) {
@@ -93,7 +95,6 @@ class SearchController extends Controller {
 				$originalLink = $document->getLink();
 				$title = $document->getTitle();
 				$tags = $document->getTags();
-				$metaTags = $document->getMetaTags();
 				$excerptTexts = array_slice(array_map(static fn ($e) => $e['excerpt'], $excerpts), 0, 3);
 
 				$documents[] = [
@@ -109,13 +110,25 @@ class SearchController extends Controller {
 					'titleMatch' => !empty($this->computeMatchedTerms($term, $title, [], [])),
 					'collective' => $this->extractCollectiveFromLink($document->getProviderId(), $originalLink),
 					'fileType' => $this->extractFileType($document->getProviderId(), $title),
-					// Chapitre/sous-chapitre parent d'une page Collectives (voir
-					// fulltextsearch_collectives::getParentChapterTitle) ; absent pour
-					// les autres providers ou pour une page racine sans parent.
-					'chapter' => $metaTags[0] ?? null,
+					// Rempli juste apres, via fetchChapterMap() : IIndexDocument::getMetaTags()
+					// revient toujours vide ici (fulltextsearch_elasticsearch::parseSearchEntry()
+					// n'inclut ni tags ni metatags dans le chemin de recherche multi-resultats,
+					// contrairement au chemin "un seul document" getDocument()).
+					'chapter' => null,
 				];
 			}
 		}
+
+		// Contournement de la limite ci-dessus : on va chercher les metatags (chapitre
+		// parent) directement dans Elasticsearch via un _mget groupe (une seule requete
+		// HTTP pour tous les documents "collectives" du lot), plutot qu'un GET par document.
+		$chapterMap = $this->fetchChapterMap($documents);
+		foreach ($documents as &$doc) {
+			if ($doc['providerId'] === 'collectives') {
+				$doc['chapter'] = $chapterMap[$doc['providerId'] . ':' . $doc['id']] ?? null;
+			}
+		}
+		unset($doc);
 
 		$provider = (string)$this->request->getParam('provider', '');
 		$tabDocuments = $provider === ''
@@ -130,11 +143,17 @@ class SearchController extends Controller {
 
 		$filtered = $this->applyFilters($tabDocuments);
 		$filtered = $this->applySort($filtered, (string)$this->request->getParam('sort', 'relevance'));
-		$page = array_slice($filtered, 0, 60);
+
+		$total = count($filtered);
+		$totalPages = max(1, (int)ceil($total / self::PAGE_SIZE));
+		$requestedPage = max(1, (int)$this->request->getParam('page', 1));
+		$requestedPage = min($requestedPage, $totalPages);
+		$pageResults = array_slice($filtered, ($requestedPage - 1) * self::PAGE_SIZE, self::PAGE_SIZE);
 
 		// Le contenu complet (pour la previsualisation avec surbrillance) n'est recupere
-		// que pour les resultats reellement affiches, pas pour les ~150 candidats bruts.
-		foreach ($page as &$doc) {
+		// que pour les resultats de la page reellement affichee, pas pour tous les
+		// candidats bruts remontes par Elasticsearch.
+		foreach ($pageResults as &$doc) {
 			$fullContent = $this->fetchFullContent($doc['providerId'], $doc['id']);
 			if ($fullContent !== '' && empty($doc['matchedTerms'])) {
 				$doc['matchedTerms'] = $this->computeMatchedTerms($term, $doc['title'], $doc['excerpts'], $doc['tags'], $fullContent);
@@ -144,10 +163,12 @@ class SearchController extends Controller {
 		unset($doc);
 
 		return new JSONResponse([
-			'results' => $page,
+			'results' => $pageResults,
 			'facets' => $facets,
-			'total' => count($filtered),
+			'total' => $total,
 			'totalUnfiltered' => count($tabDocuments),
+			'page' => $requestedPage,
+			'totalPages' => $totalPages,
 			'weightsUsed' => $weights,
 			'isAdmin' => $this->groupManager->isAdmin($user->getUID()),
 		]);
@@ -330,6 +351,62 @@ class SearchController extends Controller {
 
 		$full = trim($content . ' ' . $partsText);
 		return mb_substr($full, 0, 20000);
+	}
+
+	/**
+	 * Chapitre/sous-chapitre parent de chaque document "collectives" du lot, en UNE
+	 * seule requete Elasticsearch (_mget) plutot qu'un GET par document. Necessaire car
+	 * IIndexDocument::getMetaTags() revient toujours vide sur le chemin de recherche
+	 * (voir commentaire dans search()) alors que le champ existe bien dans l'index.
+	 *
+	 * @return array<string, string> cle "providerId:documentId" => titre du chapitre
+	 */
+	private function fetchChapterMap(array $documents): array {
+		$elasticHost = $this->appConfig->getValueString('fulltextsearch_elasticsearch', 'elastic_host', '', true);
+		$elasticIndex = $this->appConfig->getValueString('fulltextsearch_elasticsearch', 'elastic_index', '', true);
+		if ($elasticHost === '' || $elasticIndex === '') {
+			return [];
+		}
+
+		$docs = [];
+		foreach ($documents as $doc) {
+			if ($doc['providerId'] === 'collectives') {
+				$docs[] = ['_id' => 'collectives:' . $doc['id'], '_source' => ['metatags']];
+			}
+		}
+		if (empty($docs)) {
+			return [];
+		}
+
+		$url = rtrim($elasticHost, '/') . '/' . $elasticIndex . '/_mget';
+
+		$ch = curl_init($url);
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+		curl_setopt($ch, CURLOPT_POST, true);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['docs' => $docs]));
+		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+		$body = curl_exec($ch);
+		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		curl_close($ch);
+
+		if ($body === false || $httpCode >= 400) {
+			return [];
+		}
+
+		$decoded = json_decode($body, true);
+		$map = [];
+		foreach (($decoded['docs'] ?? []) as $hit) {
+			if (empty($hit['found']) || !isset($hit['_id'])) {
+				continue;
+			}
+			$metatags = $hit['_source']['metatags'] ?? [];
+			if (is_array($metatags) && !empty($metatags[0])) {
+				$map[$hit['_id']] = (string)$metatags[0];
+			}
+		}
+
+		return $map;
 	}
 
 	private function buildOpenLink(string $providerId, string $documentId, string $fallbackLink): string {
