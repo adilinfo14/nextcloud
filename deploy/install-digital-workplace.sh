@@ -423,6 +423,47 @@ if [ -n "$PUSH_DOMAIN" ]; then
 fi
 
 if [ "$ENABLE_SEARCH" = "o" ] || [ "$ENABLE_SEARCH" = "O" ]; then
+    # Les apps de recherche plein texte n'ont pas toujours une version compatible
+    # avec la toute derniere version de Nextcloud (constate en conditions reelles :
+    # sur Nextcloud 34, aucune des 4 apps ne s'installe, la plus restrictive
+    # - l'OCR - ne supportant a ce jour QUE la version 32). On verifie en direct
+    # aupres du catalogue officiel plutot que de coder en dur un numero de version
+    # qui deviendra vite obsolete, et on previent clairement plutot que de laisser
+    # une cascade d'echecs d'installation confus.
+    info "Vérification de la compatibilité des apps de recherche avec cette version de Nextcloud..."
+    NC_VERSION=$(occ status | grep versionstring | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    SEARCH_APPS_COMPATIBLE=1
+    if ! docker exec nextcloud sh -c "curl -sL 'https://apps.nextcloud.com/api/v1/apps.json' -o /tmp/appstore-check.json" 2>/dev/null; then
+        warn "Impossible de contacter le catalogue Nextcloud pour vérifier la compatibilité — on tente l'installation quand même."
+    else
+        COMPAT_CHECK=$(docker exec nextcloud python3 -c "
+import json
+data = json.load(open('/tmp/appstore-check.json'))
+nc_major = int('$NC_VERSION'.split('.')[0])
+apps_needed = ['fulltextsearch', 'fulltextsearch_elasticsearch', 'files_fulltextsearch', 'files_fulltextsearch_tesseract']
+incompatible = []
+for app in data:
+    if app.get('id') in apps_needed and app.get('releases'):
+        spec = app['releases'][0].get('rawPlatformVersionSpec', '')
+        import re
+        m = re.search(r'<=\s*(\d+)', spec)
+        max_v = int(m.group(1)) if m else 999
+        if nc_major > max_v:
+            incompatible.append(app['id'] + ' (compatible jusqu a NC ' + str(max_v) + ')')
+if incompatible:
+    print('INCOMPATIBLE:' + ', '.join(incompatible))
+else:
+    print('OK')
+" 2>/dev/null || echo "OK")
+        if [[ "$COMPAT_CHECK" == INCOMPATIBLE:* ]]; then
+            SEARCH_APPS_COMPATIBLE=0
+            warn "Recherche plein texte NON installée : cette version de Nextcloud ($NC_VERSION) n'est pas encore supportée par : ${COMPAT_CHECK#INCOMPATIBLE:}"
+            warn "Réessayer plus tard (une fois ces apps mises à jour) ou déployer sur une instance Nextcloud dont la version correspond. Elasticsearch reste démarré mais inutilisé — 'docker compose stop elasticsearch' pour libérer la RAM si besoin."
+        fi
+    fi
+fi
+
+if { [ "$ENABLE_SEARCH" = "o" ] || [ "$ENABLE_SEARCH" = "O" ]; } && [ "${SEARCH_APPS_COMPATIBLE:-0}" = "1" ]; then
     info "Attente qu'Elasticsearch soit pret (peut prendre 1 minute)..."
     TRIES=0
     until docker exec nextcloud curl -s -o /dev/null -w '%{http_code}' http://elasticsearch:9200 2>/dev/null | grep -q "200"; do
