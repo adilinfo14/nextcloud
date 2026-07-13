@@ -1,0 +1,41 @@
+#nc-search-status .nss-cards {
+	display: flex;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin: 12px 0;
+}
+
+#nc-search-status .nss-card {
+	border: 1px solid var(--color-border);
+	border-radius: var(--border-radius-large);
+	padding: 12px 18px;
+	min-width: 140px;
+}
+
+#nc-search-status .nss-card.nss-error {
+	border-color: var(--color-error);
+	color: var(--color-error);
+}
+
+#nc-search-status .nss-big {
+	font-size: 28px;
+	font-weight: bold;
+}
+
+#nc-search-status .nss-table {
+	border-collapse: collapse;
+	width: 100%;
+	max-width: 640px;
+	margin-bottom: 16px;
+}
+
+#nc-search-status .nss-table td,
+#nc-search-status .nss-table th {
+	padding: 6px 10px;
+	border-bottom: 1px solid var(--color-border);
+	text-align: left;
+}
+
+#nc-search-status #nss-reindex-btn {
+	margin-top: 8px;
+}

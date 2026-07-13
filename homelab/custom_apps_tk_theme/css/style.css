@@ -100,3 +100,24 @@ svg {
 .button-vue--vue-tertiary:hover {
 	box-shadow: 0 0 0 2px rgba(201, 168, 76, 0.3);
 }
+
+/* Legere augmentation de la hauteur de la barre du haut (50px -> 58px).
+   --header-height est la variable CSS globale que Nextcloud utilise pour
+   dimensionner la barre + les icones d'app qu'elle contient : l'augmenter
+   suffit a agrandir proportionnellement tout le bandeau sans avoir a cibler
+   chaque icone individuellement (evite de casser au prochain theme NC). */
+:root {
+	--header-height: 58px !important;
+}
+
+/* App "Assistant" (IA) : ses dégradés bleu/violet/rose sont codés en dur dans
+   le bundle JS minifié (pas modifiable proprement), mais le bundle lit ces
+   valeurs via des variables CSS avec fallback — var(--color-xxx-assistant,
+   <degrade bleu/rose par defaut>). En definissant ces variables globalement,
+   on ecrase le fallback sans toucher au JS (donc rien a refaire lors des
+   mises a jour de l'app assistant). */
+:root {
+	--color-background-assistant: var(--color-main-background);
+	--color-border-assistant: #c9a84c;
+	--color-element-assistant: linear-gradient(135deg, #c9a84c 0%, #8a7230 100%);
+}

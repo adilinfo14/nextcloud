@@ -13,9 +13,19 @@ services:
     volumes:
       - nextcloud-db:/var/lib/mysql
 
+  redis:
+    image: redis:alpine
+    container_name: nextcloud-redis
+    restart: always
+    networks:
+      - default
+
+  # Image maison = nextcloud:latest + Tesseract OCR + Ghostscript (necessaire pour
+  # l'OCR des PDF scannes indexes par la recherche plein texte). Voir nextcloud-image/Dockerfile.
   app:
     container_name: nextcloud
-    image: nextcloud
+    build: ./nextcloud-image
+    image: nextcloud-tesseract:local
     restart: always
     expose:
       - "80"                # important : pas de port public, car proxypass
@@ -26,12 +36,33 @@ services:
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.noschoixpourvous.com
       - PHP_MEMORY_LIMIT=1536M
+      - REDIS_HOST=redis
     extra_hosts:
       - "nextcloud.noschoixpourvous.com:host-gateway"
     volumes:
       - nextcloud-data:/var/www/html
     depends_on:
       - db
+      - redis
+    networks:
+      - proxy-net
+      - default
+
+  # Client Push (notifications temps reel) : reutilise l'image nextcloud pour garantir
+  # la compatibilite glibc du binaire Rust extrait de l'app notify_push.
+  notify_push:
+    image: nextcloud
+    container_name: notify_push
+    restart: always
+    entrypoint: ["/var/www/html/custom_apps/notify_push/bin/x86_64/notify_push"]
+    command: ["--port", "7867", "--nextcloud-url", "https://CHANGE_ME_your-domain.example", "--redis-url", "redis://redis:6379", "--database-url", "mysql://nextcloud:${MYSQL_PASSWORD}@db/nextcloud", "--allow-self-signed", "/var/www/html/config/config.php"]
+    volumes:
+      - nextcloud-data:/var/www/html:ro
+    extra_hosts:
+      - "CHANGE_ME_your-domain.example:host-gateway"
+    depends_on:
+      - db
+      - redis
     networks:
       - proxy-net
       - default

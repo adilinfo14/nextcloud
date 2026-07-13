@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
+    <id>fulltextsearch_collectives</id>
+    <name>Full text search - Collectives</name>
+    <summary>Indexe les pages Collectives pour la recherche plein texte</summary>
+    <description>Connecteur maison ajoutant les pages de wiki Collectives comme contenu indexable par l'app Full text search (Elasticsearch). Aucun connecteur officiel n'existe pour Collectives dans le store Nextcloud, celui-ci comble ce manque pour l'instance TKonsulting.</description>
+    <version>1.0.0</version>
+    <licence>agpl</licence>
+    <author>TKonsulting</author>
+    <namespace>FullTextSearch_Collectives</namespace>
+    <category>search</category>
+    <website>https://github.com/adilinfo14/nextcloud</website>
+    <bugs>https://github.com/adilinfo14/nextcloud/issues</bugs>
+    <dependencies>
+        <nextcloud min-version="28" max-version="34"/>
+    </dependencies>
+    <fulltextsearch>
+        <provider min-version="16">OCA\FullTextSearch_Collectives\Provider\CollectivesProvider</provider>
+    </fulltextsearch>
+</info>

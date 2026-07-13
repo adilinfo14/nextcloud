@@ -5,7 +5,7 @@
 	<name>TKonsulting Theme Refinements</name>
 	<summary>Petits ajustements CSS pour le territoire de marque TKonsulting (noir/or)</summary>
 	<description>Ajoute des touches visuelles discrètes (bordures dorées, scrollbar, accents) par-dessus le theming admin standard. N'importe quelle règle qui ne correspond plus au markup Nextcloud après une mise à jour est simplement ignorée, sans casser l'instance.</description>
-	<version>1.0.0</version>
+	<version>1.3.0</version>
 	<licence>agpl</licence>
 	<author>TKonsulting</author>
 	<namespace>TkTheme</namespace>
