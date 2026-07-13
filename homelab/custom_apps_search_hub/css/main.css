@@ -15,6 +15,9 @@
 
 #sh-searchbar {
 	margin-bottom: 16px;
+	display: flex;
+	align-items: center;
+	gap: 12px;
 }
 
 #sh-input {
@@ -24,6 +27,28 @@
 	font-size: 16px;
 	padding: 0 16px;
 	border-radius: var(--border-radius-large);
+}
+
+#sh-neural-toggle {
+	flex-shrink: 0;
+	padding: 8px 16px;
+	border-radius: var(--border-radius-large);
+	border: 1px solid var(--color-border);
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--color-text-maxcontrast);
+	user-select: none;
+}
+
+#sh-neural-toggle:hover {
+	background: var(--color-background-hover);
+}
+
+#sh-neural-toggle.active {
+	background: var(--color-primary-element);
+	border-color: var(--color-primary-element);
+	color: var(--color-primary-element-text);
+	font-weight: 600;
 }
 
 #sh-tabs {

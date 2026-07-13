@@ -174,6 +174,248 @@ class SearchController extends Controller {
 		]);
 	}
 
+	/**
+	 * "Recherche par sens" : recherche par similarite vectorielle (kNN Elasticsearch,
+	 * embeddings nomic-embed-text via Ollama), en complement de la recherche par mot-cle
+	 * de search(). Necessite un requete directe a Elasticsearch (l'API publique
+	 * IFullTextSearchManager ne supporte pas kNN) : le controle d'acces normalement
+	 * assure par cette API est donc reproduit manuellement ici (buildAccessFilterShould())
+	 * en suivant exactement la meme logique que fulltextsearch::SearchService (owner,
+	 * users, groupes, cercles) - ne jamais simplifier ce filtre.
+	 */
+	#[NoAdminRequired]
+	#[NoCSRFRequired]
+	#[UserRateLimit(limit: 60, period: 60)]
+	public function searchNeural(): JSONResponse {
+		$user = $this->userSession->getUser();
+		if ($user === null) {
+			return new JSONResponse(['error' => 'forbidden'], 403);
+		}
+
+		$term = trim((string)$this->request->getParam('term', ''));
+		if ($term === '') {
+			return new JSONResponse(['results' => [], 'facets' => $this->emptyFacets(), 'total' => 0, 'page' => 1, 'totalPages' => 1]);
+		}
+		if (mb_strlen($term) > self::MAX_TERM_LENGTH) {
+			$term = mb_substr($term, 0, self::MAX_TERM_LENGTH);
+		}
+
+		$elasticHost = $this->appConfig->getValueString('fulltextsearch_elasticsearch', 'elastic_host', '', true);
+		$elasticIndex = $this->appConfig->getValueString('fulltextsearch_elasticsearch', 'elastic_index', '', true);
+		if ($elasticHost === '' || $elasticIndex === '') {
+			return new JSONResponse(['error' => 'search_unavailable'], 503);
+		}
+
+		$vector = $this->embedText('search_query: ' . $term);
+		if ($vector === null) {
+			$this->logger->error('search_hub: echec embedding de la requete (recherche neuronale)');
+			return new JSONResponse(['error' => 'search_failed'], 500);
+		}
+
+		$query = [
+			'size' => self::RAW_FETCH_SIZE,
+			'_source' => ['title', 'tags', 'lastModified'],
+			'knn' => [
+				'field' => 'embedding_vector',
+				'query_vector' => $vector,
+				'k' => self::RAW_FETCH_SIZE,
+				'num_candidates' => self::RAW_FETCH_SIZE * 2,
+				'filter' => [
+					'bool' => ['should' => $this->buildAccessFilterShould($user)],
+				],
+			],
+		];
+
+		$ch = curl_init(rtrim($elasticHost, '/') . '/' . $elasticIndex . '/_search');
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+		curl_setopt($ch, CURLOPT_POST, true);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($query));
+		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+		$body = curl_exec($ch);
+		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		curl_close($ch);
+
+		if ($body === false || $httpCode >= 400) {
+			$this->logger->error('search_hub: recherche neuronale echouee', ['httpCode' => $httpCode]);
+			return new JSONResponse(['error' => 'search_failed'], 500);
+		}
+
+		$decoded = json_decode($body, true);
+		$hits = $decoded['hits']['hits'] ?? [];
+
+		$documents = [];
+		foreach ($hits as $hit) {
+			[$providerId, $documentId] = array_pad(explode(':', (string)$hit['_id'], 2), 2, '');
+			if ($providerId === 'files' && str_starts_with((string)($hit['_source']['title'] ?? ''), '.Collectifs/')) {
+				continue;
+			}
+
+			$title = (string)($hit['_source']['title'] ?? '');
+			$tags = $hit['_source']['tags'] ?? [];
+			$link = $this->resolveNeuralLink($providerId, $documentId);
+
+			$documents[] = [
+				'id' => $documentId,
+				'providerId' => $providerId,
+				'title' => $title,
+				'link' => $link,
+				'modifiedTime' => (int)($hit['_source']['lastModified'] ?? 0),
+				'tags' => is_array($tags) ? $tags : [],
+				'excerpts' => [],
+				'esScore' => (float)($hit['_score'] ?? 0),
+				'matchedTerms' => $this->computeMatchedTerms($term, $title, [], is_array($tags) ? $tags : []),
+				'titleMatch' => !empty($this->computeMatchedTerms($term, $title, [], [])),
+				'collective' => $this->extractCollectiveFromLink($providerId, $link),
+				'fileType' => $this->extractFileType($providerId, $title),
+				'chapter' => null,
+			];
+		}
+
+		$chapterMap = $this->fetchChapterMap($documents);
+		foreach ($documents as &$doc) {
+			if ($doc['providerId'] === 'collectives') {
+				$doc['chapter'] = $chapterMap[$doc['providerId'] . ':' . $doc['id']] ?? null;
+			}
+		}
+		unset($doc);
+
+		$provider = (string)$this->request->getParam('provider', '');
+		$tabDocuments = $provider === ''
+			? $documents
+			: array_values(array_filter($documents, static fn ($doc) => $doc['providerId'] === $provider));
+
+		$facets = $this->computeFacets($tabDocuments);
+		$facets['providers'] = $this->computeProviderCounts($documents);
+
+		$filtered = $this->applyFilters($tabDocuments);
+		// Le classement par similarite vectorielle EST le tri par defaut ici ; les autres
+		// options (date/titre) restent proposees mais "pertinence"/"pondere" n'ont pas de
+		// sens sans score BM25 ni couverture lexicale fiable - geres normalement par
+		// applySort() qui retombe sur l'ordre kNN d'origine par defaut.
+		$filtered = $this->applySort($filtered, (string)$this->request->getParam('sort', 'relevance'));
+
+		$total = count($filtered);
+		$totalPages = max(1, (int)ceil($total / self::PAGE_SIZE));
+		$requestedPage = max(1, (int)$this->request->getParam('page', 1));
+		$requestedPage = min($requestedPage, $totalPages);
+		$pageResults = array_slice($filtered, ($requestedPage - 1) * self::PAGE_SIZE, self::PAGE_SIZE);
+
+		foreach ($pageResults as &$doc) {
+			$fullContent = $this->fetchFullContent($doc['providerId'], $doc['id']);
+			if ($fullContent !== '' && empty($doc['matchedTerms'])) {
+				$doc['matchedTerms'] = $this->computeMatchedTerms($term, $doc['title'], [], $doc['tags'], $fullContent);
+			}
+			$doc['fullContent'] = $fullContent;
+		}
+		unset($doc);
+
+		return new JSONResponse([
+			'results' => $pageResults,
+			'facets' => $facets,
+			'total' => $total,
+			'totalUnfiltered' => count($tabDocuments),
+			'page' => $requestedPage,
+			'totalPages' => $totalPages,
+			'isAdmin' => $this->groupManager->isAdmin($user->getUID()),
+			'neural' => true,
+		]);
+	}
+
+	/**
+	 * Reproduit fidelement OCA\FullTextSearch\Service\SearchService::getDocumentAccessFromUser()
+	 * (app "fulltextsearch" coeur) : c'est normalement CETTE logique qui filtre les
+	 * resultats par droits d'acces avant de les renvoyer. On la duplique ici car le kNN
+	 * direct sur Elasticsearch contourne cette API. Ne pas simplifier (ex: retirer les
+	 * cercles) sans revalider que ca ne fuite pas de document prive.
+	 */
+	private function buildAccessFilterShould(\OCP\IUser $user): array {
+		$viewerId = $user->getUID();
+		$should = [
+			['term' => ['owner.keyword' => $viewerId]],
+			['term' => ['users.keyword' => $viewerId]],
+			['term' => ['users.keyword' => '__all']],
+		];
+
+		foreach ($this->groupManager->getUserGroupIds($user) as $group) {
+			$should[] = ['term' => ['groups.keyword' => $group]];
+		}
+
+		try {
+			$circleManager = \OC::$server->get(\OCA\Circles\CirclesManager::class);
+			$circleManager->startSession();
+			foreach ($circleManager->getCircles() as $circle) {
+				$should[] = ['term' => ['circles.keyword' => $circle->getSingleId()]];
+			}
+		} catch (\Throwable $e) {
+			// App Circles indisponible : owner/users/groupes suffisent deja pour Files/Deck ;
+			// seul un partage explicite par cercle (hors appartenance Collectives, deja
+			// couverte via "users") serait manque ici.
+		}
+
+		return $should;
+	}
+
+	/**
+	 * Lien navigable pour un resultat de recherche neuronale : la recherche kNN etant une
+	 * requete Elasticsearch brute (pas IFullTextSearchManager::search()), le hook
+	 * improveSearchResult() de chaque provider n'est jamais appele - on reproduit
+	 * l'equivalent au cas par cas en reutilisant les services deja existants de chaque app.
+	 */
+	private function resolveNeuralLink(string $providerId, string $documentId): string {
+		if ($providerId === 'files' && ctype_digit($documentId)) {
+			try {
+				return $this->urlGenerator->linkToRoute('files.View.showFile', ['fileid' => (int)$documentId]);
+			} catch (\Throwable $e) {
+				return '';
+			}
+		}
+
+		if ($providerId === 'collectives') {
+			try {
+				$service = \OC::$server->get(\OCA\FullTextSearch_Collectives\Service\FullTextSearchService::class);
+				return $service->getPageLink((int)$documentId) ?? '';
+			} catch (\Throwable $e) {
+				return '';
+			}
+		}
+
+		if ($providerId === 'deck') {
+			try {
+				$service = \OC::$server->get(\OCA\Deck\Service\FullTextSearchService::class);
+				$board = $service->getBoardFromCardId((int)$documentId);
+				return $this->urlGenerator->linkToRoute('deck.page.index') . '/board/' . $board->getId() . '/card/' . $documentId;
+			} catch (\Throwable $e) {
+				return '';
+			}
+		}
+
+		return '';
+	}
+
+	private function embedText(string $text): ?array {
+		$ollamaHost = $this->appConfig->getValueString('search_hub', 'ollama_host', 'http://ollama:11434');
+		$model = $this->appConfig->getValueString('search_hub', 'embedding_model', 'nomic-embed-text');
+
+		$ch = curl_init(rtrim($ollamaHost, '/') . '/api/embeddings');
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+		curl_setopt($ch, CURLOPT_POST, true);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['model' => $model, 'prompt' => $text]));
+		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+		$body = curl_exec($ch);
+		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		curl_close($ch);
+
+		if ($body === false || $httpCode >= 400) {
+			return null;
+		}
+
+		$decoded = json_decode($body, true);
+		$vector = $decoded['embedding'] ?? null;
+		return is_array($vector) ? $vector : null;
+	}
+
 	private function computeMatchedTerms(string $term, string $title, array $excerpts, array $tags, string $fullContent = ''): array {
 		$words = preg_split('/\s+/u', mb_strtolower(trim($term)));
 		$words = array_values(array_unique(array_filter($words, static function ($w) {

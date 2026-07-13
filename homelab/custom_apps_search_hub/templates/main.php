@@ -6,6 +6,7 @@
 	<div id="sh-app">
 		<div id="sh-searchbar">
 			<input type="text" id="sh-input" placeholder="Rechercher dans les fichiers, le wiki, Deck..." autocomplete="off" />
+			<span id="sh-neural-toggle" title="Recherche par sens (similarite semantique plutot que mot-cle exact)">Recherche par sens</span>
 		</div>
 
 		<div id="sh-tabs"></div>

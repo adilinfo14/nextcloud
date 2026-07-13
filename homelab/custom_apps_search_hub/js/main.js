@@ -11,6 +11,7 @@
 		period: '',
 		sort: 'relevance',
 		page: 1,
+		neural: false,
 		weights: { wRelevance: 50, wTitle: 20, wCoverage: 20, wRecency: 10 },
 	};
 
@@ -115,7 +116,8 @@
 			return;
 		}
 
-		document.getElementById('sh-results').innerHTML = '<div id="sh-loading">Recherche en cours...</div>';
+		document.getElementById('sh-results').innerHTML = '<div id="sh-loading">' +
+			(state.neural ? 'Recherche par sens en cours...' : 'Recherche en cours...') + '</div>';
 
 		var params = new URLSearchParams({
 			term: state.term,
@@ -133,7 +135,9 @@
 			wRecency: state.weights.wRecency,
 		});
 
-		fetch(OC.generateUrl('/apps/search_hub/api/search') + '?' + params.toString(), {
+		var endpoint = state.neural ? 'api/search-neural' : 'api/search';
+
+		fetch(OC.generateUrl('/apps/search_hub/' + endpoint) + '?' + params.toString(), {
 			headers: { requesttoken: OC.requestToken },
 		})
 			.then(function (r) { return r.json(); })
@@ -507,6 +511,17 @@
 			clearTimeout(debounceTimer);
 			debounceTimer = setTimeout(runSearch, 350);
 		});
+
+		var neuralToggle = document.getElementById('sh-neural-toggle');
+		neuralToggle.addEventListener('click', function () {
+			state.neural = !state.neural;
+			state.page = 1;
+			neuralToggle.classList.toggle('active', state.neural);
+			if (state.term !== '') {
+				runSearch();
+			}
+		});
+
 		renderAll();
 	}
 

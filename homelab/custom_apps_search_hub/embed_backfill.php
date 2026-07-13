@@ -1,0 +1,134 @@
+<?php
+// Backfill des embeddings (nomic-embed-text, 768 dim) pour les documents Elasticsearch
+// qui n'en ont pas encore (recherche_hub / Recherche+ - mode "Recherche par sens").
+// Script autonome (pas de bootstrap Nextcloud necessaire) : incremental par construction
+// (ne cible que embedding_vector manquant), donc a re-executer periodiquement (cron) pour
+// rattraper les nouveaux documents indexes depuis.
+//
+// Piege important (trouve en prod le 2026-07-13) : nomic-embed-text plante avec un
+// panic Ollama ("caching disabled but unable to fit entire input in a batch") si le
+// texte envoye depasse la taille de batch du modele (~512 tokens). Un texte de 3000
+// caracteres declenchait ce crash sur ~170/1808 documents (ceux au contenu le plus
+// dense). D'ou TEXT_MAX_LEN volontairement conservateur (800 car.) + un retry
+// automatique avec un texte encore plus court en cas d'echec, plutot que de perdre le
+// document silencieusement.
+
+$elasticHost = 'http://elasticsearch:9200';
+$elasticIndex = 'nextcloud_tkonsulting';
+$ollamaHost = 'http://ollama:11434';
+$model = 'nomic-embed-text';
+$batchSize = 30;
+$textMaxLen = 800;
+$textMaxLenRetry = 300;
+
+function esCurl(string $method, string $url, ?array $body = null): array {
+	$ch = curl_init($url);
+	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+	curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+	curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+	if ($body !== null) {
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body));
+		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+	}
+	$raw = curl_exec($ch);
+	$code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+	curl_close($ch);
+	if ($raw === false) {
+		return ['error' => 'curl_failed', 'code' => $code];
+	}
+	$decoded = json_decode($raw, true);
+	return is_array($decoded) ? $decoded : ['error' => 'bad_json', 'raw' => $raw];
+}
+
+function embed(string $ollamaHost, string $model, string $text): ?array {
+	$ch = curl_init($ollamaHost . '/api/embeddings');
+	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+	curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+	curl_setopt($ch, CURLOPT_POST, true);
+	curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['model' => $model, 'prompt' => $text]));
+	curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+	$raw = curl_exec($ch);
+	curl_close($ch);
+	if ($raw === false) {
+		return null;
+	}
+	$decoded = json_decode($raw, true);
+	$vector = $decoded['embedding'] ?? null;
+	return is_array($vector) ? $vector : null;
+}
+
+$scrollUrl = $elasticHost . '/' . $elasticIndex . '/_search?scroll=5m';
+$result = esCurl('POST', $scrollUrl, [
+	'size' => $batchSize,
+	'_source' => ['title', 'content', 'parts'],
+	'query' => ['bool' => ['must_not' => ['exists' => ['field' => 'embedding_vector']]]],
+]);
+
+if (isset($result['error']) && !isset($result['_scroll_id'])) {
+	fwrite(STDERR, "Erreur ES initiale : " . json_encode($result) . "\n");
+	exit(1);
+}
+
+$scrollId = $result['_scroll_id'] ?? null;
+$total = $result['hits']['total']['value'] ?? 0;
+$processed = 0;
+$embedded = 0;
+$skipped = 0;
+$errors = 0;
+
+echo "A traiter : $total\n";
+
+while (true) {
+	$hits = $result['hits']['hits'] ?? [];
+	if (empty($hits)) {
+		break;
+	}
+
+	foreach ($hits as $hit) {
+		$processed++;
+		$id = $hit['_id'];
+		$source = $hit['_source'] ?? [];
+		$title = (string)($source['title'] ?? '');
+		$content = (string)($source['content'] ?? '');
+		$parts = $source['parts'] ?? [];
+		$partsText = is_array($parts) ? implode(' ', array_filter($parts, 'is_string')) : '';
+
+		$fullText = trim($title . "\n" . $content . ' ' . $partsText);
+		if ($fullText === '') {
+			$skipped++;
+			continue;
+		}
+
+		$vector = embed($ollamaHost, $model, 'search_document: ' . mb_substr($fullText, 0, $textMaxLen));
+		if ($vector === null) {
+			// Probable crash "batch trop grand" sur un document tres dense : retente une
+			// seule fois avec un texte plus court avant d'abandonner ce document.
+			$vector = embed($ollamaHost, $model, 'search_document: ' . mb_substr($fullText, 0, $textMaxLenRetry));
+		}
+		if ($vector === null) {
+			$errors++;
+			echo "ERREUR embed $id\n";
+			continue;
+		}
+
+		$updateResult = esCurl('POST', $elasticHost . '/' . $elasticIndex . '/_update/' . rawurlencode($id), [
+			'doc' => ['embedding_vector' => $vector],
+		]);
+		if (isset($updateResult['error'])) {
+			$errors++;
+			echo "ERREUR update $id : " . json_encode($updateResult) . "\n";
+		} else {
+			$embedded++;
+		}
+	}
+
+	echo "Progression : $processed / $total (embedded=$embedded, skipped=$skipped, errors=$errors)\n";
+
+	$result = esCurl('POST', $elasticHost . '/_search/scroll', [
+		'scroll' => '5m',
+		'scroll_id' => $scrollId,
+	]);
+	$scrollId = $result['_scroll_id'] ?? $scrollId;
+}
+
+echo "Termine. processed=$processed embedded=$embedded skipped=$skipped errors=$errors\n";
