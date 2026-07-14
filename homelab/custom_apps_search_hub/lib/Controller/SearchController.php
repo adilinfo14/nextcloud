@@ -269,6 +269,18 @@ class SearchController extends Controller {
 			}
 		}
 
+		// Connecteur iaeasy.noschoixpourvous.com (2026-07-14) : application separee, pas
+		// une app Nextcloud - IFullTextSearchManager ne le connait pas (aucun
+		// IFullTextSearchProvider enregistre), donc ses documents (indexes directement
+		// dans le MEME index ES par iaeasy_index.php, provider="iaeasy") ne remontent
+		// jamais via l'appel ci-dessus. On va les chercher separement par une requete ES
+		// directe et on les fusionne dans le meme tableau $documents - tout le reste du
+		// pipeline (facettes, ponderation, tri, filtres) les traite alors comme n'importe
+		// quel autre resultat.
+		foreach ($this->fetchIaeasyKeywordMatches($expandedTerm, $term) as $iaeasyDoc) {
+			$documents[] = $iaeasyDoc;
+		}
+
 		// Contournement de la limite ci-dessus : on va chercher les metatags (chapitre
 		// parent) directement dans Elasticsearch via un _mget groupe (une seule requete
 		// HTTP pour tous les documents "collectives" du lot), plutot qu'un GET par document.
@@ -457,7 +469,10 @@ class SearchController extends Controller {
 			}
 
 			$tags = $meta['tags'];
-			$link = $this->resolveNeuralLink($providerId, $documentId);
+			// iaeasy n'a pas de route Nextcloud a resoudre (resolveNeuralLink() ne connait
+			// que files/collectives/deck) - le lien absolu est deja stocke sur le document
+			// parent par iaeasy_index.php (voir fetchParentMetadata()).
+			$link = $providerId === 'iaeasy' ? ($meta['iaeasyLink'] ?? '') : $this->resolveNeuralLink($providerId, $documentId);
 			$matchedTerms = $this->computeMatchedTerms($term, $title, [$best['chunkText']], $tags);
 
 			$documents[] = [
@@ -472,7 +487,7 @@ class SearchController extends Controller {
 				'matchedTerms' => $matchedTerms,
 				'titleMatch' => !empty($this->computeMatchedTerms($term, $title, [], [])),
 				'collective' => $this->extractCollectiveFromLink($providerId, $link),
-				'fileType' => $this->extractFileType($providerId, $title),
+				'fileType' => $providerId === 'iaeasy' ? $this->iaeasyFileType($tags) : $this->extractFileType($providerId, $title),
 				'chapter' => null,
 			];
 		}
@@ -550,7 +565,7 @@ class SearchController extends Controller {
 			return [];
 		}
 
-		$docs = array_map(static fn ($id) => ['_id' => $id, '_source' => ['title', 'tags', 'lastModified']], $parentIds);
+		$docs = array_map(static fn ($id) => ['_id' => $id, '_source' => ['title', 'tags', 'lastModified', 'iaeasy_link']], $parentIds);
 
 		$ch = curl_init(rtrim($elasticHost, '/') . '/' . $elasticIndex . '/_mget');
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -578,10 +593,102 @@ class SearchController extends Controller {
 				'title' => (string)($source['title'] ?? ''),
 				'tags' => is_array($tags) ? $tags : [],
 				'lastModified' => (int)($source['lastModified'] ?? 0),
+				'iaeasyLink' => (string)($source['iaeasy_link'] ?? ''),
 			];
 		}
 
 		return $map;
+	}
+
+	/**
+	 * Recherche mot-cle sur les documents du connecteur iaeasy (voir commentaire dans
+	 * search()) : requete ES directe filtree sur provider="iaeasy" (les passages n'ont
+	 * jamais ce champ - seuls les documents PARENTS l'ont - donc le filtre les exclut
+	 * naturellement, pas besoin d'un must_not exists parent_id supplementaire). $term
+	 * ORIGINAL (pas $expandedTerm) sert uniquement au calcul de matchedTerms/titleMatch,
+	 * comme partout ailleurs dans cette classe.
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function fetchIaeasyKeywordMatches(string $expandedTerm, string $term): array {
+		$elasticHost = $this->appConfig->getValueString('fulltextsearch_elasticsearch', 'elastic_host', '', true);
+		$elasticIndex = $this->appConfig->getValueString('fulltextsearch_elasticsearch', 'elastic_index', '', true);
+		if ($elasticHost === '' || $elasticIndex === '') {
+			return [];
+		}
+
+		$query = [
+			'size' => 100,
+			'_source' => ['title', 'content', 'tags', 'lastModified', 'iaeasy_link'],
+			'query' => [
+				'bool' => [
+					'must' => [['multi_match' => ['query' => $expandedTerm, 'fields' => ['title^2', 'content']]]],
+					'filter' => [['term' => ['provider.keyword' => 'iaeasy']]],
+				],
+			],
+		];
+
+		$ch = curl_init(rtrim($elasticHost, '/') . '/' . $elasticIndex . '/_search');
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+		curl_setopt($ch, CURLOPT_POST, true);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($query));
+		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+		$body = curl_exec($ch);
+		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		curl_close($ch);
+
+		if ($body === false || $httpCode >= 400) {
+			return [];
+		}
+
+		$decoded = json_decode($body, true);
+		$hits = $decoded['hits']['hits'] ?? [];
+
+		$documents = [];
+		foreach ($hits as $hit) {
+			$source = $hit['_source'] ?? [];
+			$fullId = (string)$hit['_id']; // "iaeasy:<source>:<itemId>"
+			$documentId = mb_substr($fullId, mb_strlen('iaeasy:'));
+			$title = (string)($source['title'] ?? '');
+			$content = (string)($source['content'] ?? '');
+			$tags = is_array($source['tags'] ?? null) ? $source['tags'] : [];
+			$excerpt = mb_substr($content, 0, 300);
+
+			$documents[] = [
+				'id' => $documentId,
+				'providerId' => 'iaeasy',
+				'title' => $title,
+				'link' => (string)($source['iaeasy_link'] ?? 'https://iaeasy.noschoixpourvous.com'),
+				'modifiedTime' => (int)($source['lastModified'] ?? 0),
+				'tags' => $tags,
+				'excerpts' => $excerpt !== '' ? [$excerpt] : [],
+				'esScore' => (float)($hit['_score'] ?? 0),
+				'matchedTerms' => $this->computeMatchedTerms($term, $title, [$excerpt], $tags, $content),
+				'titleMatch' => !empty($this->computeMatchedTerms($term, $title, [], [])),
+				'collective' => null,
+				'fileType' => $this->iaeasyFileType($tags),
+				'chapter' => null,
+			];
+		}
+
+		return $documents;
+	}
+
+	/**
+	 * Le "type de document" affiche pour un resultat iaeasy vient du "subtype" pose
+	 * par iaeasy_index.php dans le champ tags (ex: "modele", "glossaire", "metier") -
+	 * PAS de extractFileType() (pensee pour une extension de fichier, non pertinente
+	 * ici puisque ce ne sont jamais de vrais fichiers).
+	 */
+	private function iaeasyFileType(array $tags): string {
+		$labels = [
+			'modele' => 'modele-ia', 'gabarit' => 'gabarit-agent', 'brique' => 'brique-agent',
+			'scenario' => 'scenario-entrainement', 'glossaire' => 'glossaire', 'metier' => 'metier',
+			'securite' => 'securite', 'video' => 'video',
+		];
+		$subtype = $tags[0] ?? '';
+		return $labels[$subtype] ?? 'iaeasy';
 	}
 
 	/**

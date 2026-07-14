@@ -41,10 +41,13 @@
 	var expandedCollectives = {};
 	var expandedGroups = {};
 
-	var PROVIDER_LABELS = { files: 'Fichiers', collectives: 'Wiki', deck: 'Deck' };
+	var PROVIDER_LABELS = { files: 'Fichiers', collectives: 'Wiki', deck: 'Deck', iaeasy: 'iaeasy' };
 	var TYPE_LABELS = {
 		pdf: 'PDF', image: 'Image', document: 'Document texte', tableur: 'Tableur',
 		presentation: 'Presentation', texte: 'Texte', 'page-wiki': 'Page wiki', carte: 'Carte Deck', autre: 'Autre',
+		'modele-ia': 'Modele IA', 'gabarit-agent': 'Gabarit (Constructeur)', 'brique-agent': 'Brique (Constructeur)',
+		'scenario-entrainement': 'Scenario d\'entrainement', glossaire: 'Terme de glossaire', metier: 'Fiche metier',
+		securite: 'Fiche securite', video: 'Video',
 	};
 	var PERIOD_LABELS = { '24h': 'Dernieres 24h', '7j': '7 derniers jours', '30j': '30 derniers jours' };
 
@@ -183,7 +186,7 @@
 		var total = lastData ? lastData.totalUnfiltered : 0;
 
 		var tabs = [{ id: '', label: 'Tous', count: total }];
-		['files', 'collectives', 'deck'].forEach(function (p) {
+		['files', 'collectives', 'deck', 'iaeasy'].forEach(function (p) {
 			tabs.push({ id: p, label: PROVIDER_LABELS[p], count: facets.providers[p] || 0 });
 		});
 

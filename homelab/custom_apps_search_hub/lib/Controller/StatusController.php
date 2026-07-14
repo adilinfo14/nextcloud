@@ -258,6 +258,7 @@ class StatusController extends Controller {
 		],
 		'reranking' => ['model' => 'llama3:8b', 'topN' => 15],
 		'synonyms' => [],
+		'iaeasy' => ['apiBase' => 'https://iaeasy.noschoixpourvous.com/api'],
 	];
 
 	/**
@@ -318,6 +319,13 @@ class StatusController extends Controller {
 			}
 		}
 
+		if (isset($input['iaeasy']) && is_array($input['iaeasy'])) {
+			$apiBase = $input['iaeasy']['apiBase'] ?? '';
+			if (is_string($apiBase) && preg_match('#^https://#', $apiBase)) {
+				$out['iaeasy']['apiBase'] = rtrim($apiBase, '/');
+			}
+		}
+
 		if (isset($input['synonyms']) && is_array($input['synonyms'])) {
 			$groups = [];
 			foreach ($input['synonyms'] as $group) {
@@ -359,9 +367,12 @@ class StatusController extends Controller {
 	/**
 	 * Rend explicite la notion de "connecteur" (une source de contenu indexee dans
 	 * Recherche+) - demande utilisateur du 2026-07-14 : montrer clairement ce qui EST
-	 * connecte aujourd'hui, et ce qui pourrait l'etre (ex: iaeasy.noschoixpourvous.com,
-	 * une application separee sur le meme serveur, actuellement AUCUN connecteur -
-	 * ni Fichiers/Wiki/Deck, tous bases sur l'API Nextcloud, ne s'y applique).
+	 * connecte aujourd'hui, et ce qui pourrait l'etre. iaeasy.noschoixpourvous.com est
+	 * passe de "propose" a "actif" le meme jour (iaeasy_index.php) : ce n'est PAS un
+	 * IFullTextSearchProvider (application separee, FastAPI/Python) mais un connecteur
+	 * d'un genre different - indexation directe dans Elasticsearch depuis l'API
+	 * publique de ce site (7 sources : catalogue, gabarits/briques du Constructeur,
+	 * scenarios d'entrainement, glossaire, metiers, securite, videos).
 	 */
 	private function getConnectors(): array {
 		return [
@@ -369,14 +380,9 @@ class StatusController extends Controller {
 				['id' => 'files', 'label' => 'Fichiers', 'type' => 'Application Nextcloud native (IFullTextSearchProvider)'],
 				['id' => 'collectives', 'label' => 'Wiki (Collectives)', 'type' => 'Connecteur custom (fulltextsearch_collectives, developpe pour ce projet)'],
 				['id' => 'deck', 'label' => 'Deck', 'type' => 'Application Nextcloud native (IFullTextSearchProvider)'],
+				['id' => 'iaeasy', 'label' => 'iaeasy.noschoixpourvous.com', 'type' => 'Connecteur custom (iaeasy_index.php, indexation directe ES depuis l\'API publique - pas un IFullTextSearchProvider)'],
 			],
-			'proposed' => [
-				[
-					'id' => 'iaeasy',
-					'label' => 'iaeasy.noschoixpourvous.com',
-					'reason' => 'Application separee (FastAPI/Python), pas une app Nextcloud - necessiterait un connecteur d\'un genre different (indexation depuis l\'exterieur, pas via IFullTextSearchProvider).',
-				],
-			],
+			'proposed' => [],
 		];
 	}
 
@@ -411,6 +417,27 @@ class StatusController extends Controller {
 	}
 
 	/**
+	 * Synchronisation du connecteur iaeasy : resync COMPLETE (pas incrementale, voir
+	 * en-tete d'iaeasy_index.php) depuis l'API publique iaeasy.noschoixpourvous.com,
+	 * quelques secondes a quelques minutes selon Ollama - meme pattern de declenchement
+	 * en tache de fond que reindexEmbeddings() ci-dessus.
+	 */
+	public function reindexIaeasy(): JSONResponse {
+		if (!$this->isCurrentUserAdmin()) {
+			return new JSONResponse(['error' => 'forbidden'], 403);
+		}
+
+		$logPath = '/tmp/search_hub_iaeasy_index.log';
+		$cmd = 'nohup php /var/www/html/custom_apps/search_hub/iaeasy_index.php > '
+			. escapeshellarg($logPath) . ' 2>&1 & echo $!';
+
+		exec($cmd, $output);
+		$this->logger->info('search_hub: synchronisation iaeasy declenchee manuellement depuis le tableau de bord admin');
+
+		return new JSONResponse(['started' => true, 'pid' => $output[0] ?? null]);
+	}
+
+	/**
 	 * Logs LISIBLES depuis la console admin : uniquement ceux ecrits DANS le conteneur
 	 * (les executions manuelles declenchees ci-dessus). Le cron quotidien du backfill
 	 * ecrit lui sur le systeme de fichiers HOTE (/home/adil/search-hub-embeddings.log,
@@ -426,6 +453,7 @@ class StatusController extends Controller {
 		$files = [
 			'reindex' => ['path' => '/tmp/search_hub_reindex.log', 'label' => 'Derniere reindexation manuelle (mot-cle)'],
 			'embedBackfill' => ['path' => '/tmp/search_hub_embed_backfill.log', 'label' => 'Dernier backfill manuel (embeddings)'],
+			'iaeasyIndex' => ['path' => '/tmp/search_hub_iaeasy_index.log', 'label' => 'Derniere synchronisation iaeasy'],
 		];
 
 		foreach ($files as $key => $info) {
@@ -443,6 +471,7 @@ class StatusController extends Controller {
 			'hostOnlyLogs' => [
 				'/home/adil/nextcloud-cron.log (cron BM25, 1 min)',
 				'/home/adil/search-hub-embeddings.log (cron embeddings, 4h15)',
+				'/home/adil/search-hub-iaeasy.log (cron connecteur iaeasy, 4h30)',
 			],
 		]);
 	}

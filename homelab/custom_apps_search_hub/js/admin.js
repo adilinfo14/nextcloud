@@ -34,7 +34,7 @@
 	}
 
 	function providerLabel(id) {
-		var labels = { files: 'Fichiers', deck: 'Deck', collectives: 'Wiki (Collectives)' };
+		var labels = { files: 'Fichiers', deck: 'Deck', collectives: 'Wiki (Collectives)', iaeasy: 'iaeasy.noschoixpourvous.com' };
 		return labels[id] || id;
 	}
 
@@ -121,6 +121,9 @@
 			});
 			html += '</tbody></table>';
 		}
+		if (connectors.active.some(function (c) { return c.id === 'iaeasy'; })) {
+			html += '<button id="nss-iaeasy-reindex-btn" class="button">Synchroniser iaeasy maintenant</button>';
+		}
 
 		// --- Connecteurs natifs (OCR / groupfolders) ---
 		html += '<h3>Connecteurs natifs Nextcloud</h3>';
@@ -168,6 +171,11 @@
 			embedBtn.addEventListener('click', triggerEmbedReindex);
 		}
 
+		var iaeasyBtn = document.getElementById('nss-iaeasy-reindex-btn');
+		if (iaeasyBtn) {
+			iaeasyBtn.addEventListener('click', triggerIaeasyReindex);
+		}
+
 		loadLogs();
 		loadConfig();
 	}
@@ -207,6 +215,20 @@
 			btn.textContent = 'Backfill lance en tache de fond...';
 		}
 		fetch(OC.generateUrl('/apps/search_hub/admin/reindex-embeddings'), {
+			method: 'POST',
+			headers: { requesttoken: OC.requestToken },
+		}).then(function () {
+			setTimeout(load, 3000);
+		});
+	}
+
+	function triggerIaeasyReindex() {
+		var btn = document.getElementById('nss-iaeasy-reindex-btn');
+		if (btn) {
+			btn.disabled = true;
+			btn.textContent = 'Synchronisation iaeasy en tache de fond...';
+		}
+		fetch(OC.generateUrl('/apps/search_hub/admin/reindex-iaeasy'), {
 			method: 'POST',
 			headers: { requesttoken: OC.requestToken },
 		}).then(function () {
@@ -299,6 +321,11 @@
 		html += '<div class="nss-field"><label>Nombre de candidats reclasses</label>' +
 			'<input type="number" id="cfg-reranking-topN" value="' + r.topN + '" min="1" max="50"></div>';
 
+		var ia = config.iaeasy || { apiBase: 'https://iaeasy.noschoixpourvous.com/api' };
+		html += '<h4>Connecteur iaeasy</h4>';
+		html += '<div class="nss-field"><label>URL de base de l\'API iaeasy</label>' +
+			'<input type="text" id="cfg-iaeasy-apiBase" value="' + esc(ia.apiBase) + '"></div>';
+
 		html += '<h4>Dictionnaire de synonymes / thesaurus</h4>';
 		html += '<p class="settings-hint">Un groupe = des termes equivalents (ex: "IA, intelligence artificielle, AI"). Chercher l\'un elargit automatiquement la recherche aux autres.</p>';
 		html += '<div id="nss-synonyms">';
@@ -379,6 +406,9 @@
 			reranking: {
 				model: document.getElementById('cfg-reranking-model').value.trim(),
 				topN: parseInt(document.getElementById('cfg-reranking-topN').value, 10),
+			},
+			iaeasy: {
+				apiBase: document.getElementById('cfg-iaeasy-apiBase').value.trim(),
 			},
 			synonyms: synonyms,
 		};
