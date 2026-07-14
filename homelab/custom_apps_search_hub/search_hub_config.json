@@ -1,0 +1,26 @@
+{
+    "embedding": {
+        "model": "mxbai-embed-large",
+        "chunkSize": 6000,
+        "chunkOverlap": 500,
+        "chunkSizeRetry": 350,
+        "minContentLen": 20,
+        "maxChunksPerDoc": 200,
+        "imageExtensions": ["jpg", "jpeg", "png", "gif", "bmp", "heic", "heif", "webp", "tiff", "tif"],
+        "spreadsheetExtensions": ["xlsx", "xls", "ods", "csv"],
+        "demoPathPrefixes": ["Modèles/", "Templates/", "Notes/"],
+        "demoExactTitles": [
+            "Documents/Example.md",
+            "1. Ouvrez pour en apprendre davantage sur les tableaux et les cartes",
+            "2. Faites glisser les cartes vers la gauche et la droite, vers le haut et le bas",
+            "Créez votre première carte !",
+            "3. Appliquer un formatage riche et lier le contenu",
+            "4. Partagez, commentez et collaborez !"
+        ]
+    },
+    "reranking": {
+        "model": "llama3:8b",
+        "topN": 15
+    },
+    "synonyms": []
+}

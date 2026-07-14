@@ -43,6 +43,90 @@ class SearchController extends Controller {
 		parent::__construct($appName, $request);
 	}
 
+	private const CONFIG_PATH = '/var/www/html/custom_apps/search_hub/search_hub_config.json';
+	private const CONFIG_DEFAULTS = [
+		'embedding' => [
+			'model' => 'mxbai-embed-large',
+		],
+		'reranking' => [
+			'model' => 'llama3:8b',
+			'topN' => 15,
+		],
+		'synonyms' => [],
+	];
+
+	/**
+	 * Configuration centralisee (2026-07-14), editable depuis la console admin
+	 * (Parametrage) : meme fichier lu par embed_backfill.php, pour eviter qu'un
+	 * changement de modele fait via l'admin ne s'applique qu'a l'un des deux (le
+	 * backfill ET la recherche doivent utiliser le meme modele d'embedding).
+	 * Cache statique : le fichier n'est lu qu'une fois par requete PHP, pas a
+	 * chaque appel de config().
+	 */
+	private static ?array $configCache = null;
+
+	private function loadConfig(): array {
+		if (self::$configCache !== null) {
+			return self::$configCache;
+		}
+
+		$userConfig = file_exists(self::CONFIG_PATH) ? json_decode((string)file_get_contents(self::CONFIG_PATH), true) : null;
+		self::$configCache = is_array($userConfig) ? array_replace_recursive(self::CONFIG_DEFAULTS, $userConfig) : self::CONFIG_DEFAULTS;
+
+		return self::$configCache;
+	}
+
+	/**
+	 * Dictionnaire de synonymes/thesaurus (2026-07-14) : si le terme cherche correspond
+	 * (MOT ENTIER, pas sous-chaine) a un des termes d'un groupe configure, les AUTRES
+	 * termes de ce groupe sont ajoutes au contexte envoye au moteur (BM25 ou embedding) -
+	 * sans jamais toucher le $term original utilise pour l'affichage/surbrillance. Ex: un
+	 * groupe ["IA", "intelligence artificielle", "AI"] fait que chercher "IA" elargit
+	 * aussi la requete avec "intelligence artificielle" et "AI".
+	 *
+	 * Piege trouve en testant (2026-07-14) : une comparaison par SOUS-CHAINE simple
+	 * (mb_strpos) faisait matcher "IA" a l'interieur de "connaissances" (conn-AI-ssances)
+	 * - "gestion des connaissances" se voyait alors, a tort, enrichi avec tout le groupe
+	 * de synonymes IA. D'ou l'usage de \b (frontiere de mot) via preg_match plutot qu'une
+	 * simple recherche de sous-chaine.
+	 */
+	private function expandWithSynonyms(string $term): string {
+		$groups = $this->loadConfig()['synonyms'] ?? [];
+		if (empty($groups)) {
+			return $term;
+		}
+
+		$matchesWholeWord = static function (string $needle, string $haystack): bool {
+			return $needle !== '' && preg_match('/\b' . preg_quote($needle, '/') . '\b/ui', $haystack) === 1;
+		};
+
+		$extra = [];
+		foreach ($groups as $group) {
+			$groupTerms = $group['terms'] ?? [];
+			$matches = false;
+			foreach ($groupTerms as $t) {
+				if ($matchesWholeWord($t, $term)) {
+					$matches = true;
+					break;
+				}
+			}
+			if (!$matches) {
+				continue;
+			}
+			foreach ($groupTerms as $other) {
+				if ($other !== '' && !$matchesWholeWord($other, $term)) {
+					$extra[] = $other;
+				}
+			}
+		}
+
+		if (empty($extra)) {
+			return $term;
+		}
+
+		return $term . ' ' . implode(' ', array_unique($extra));
+	}
+
 	#[NoAdminRequired]
 	#[NoCSRFRequired]
 	public function index(): TemplateResponse {
@@ -131,10 +215,15 @@ class SearchController extends Controller {
 			return new JSONResponse(['error' => 'search_unavailable'], 503);
 		}
 
+		// Le terme ORIGINAL ($term) reste utilise pour l'affichage/surbrillance -
+		// l'expansion par synonymes n'elargit QUE la requete envoyee au moteur, pour ne
+		// jamais surligner a l'utilisateur un mot qu'il n'a pas lui-meme tape.
+		$expandedTerm = $this->expandWithSynonyms($term);
+
 		try {
 			$rawResults = $this->fullTextSearchManager->search([
 				'providers' => 'all',
-				'search' => $term,
+				'search' => $expandedTerm,
 				'size' => self::RAW_FETCH_SIZE,
 				'page' => 1,
 			], $user->getUID());
@@ -283,8 +372,10 @@ class SearchController extends Controller {
 
 		// Convention de prefixe mxbai-embed-large (verifiee via la doc Ollama officielle,
 		// pas devinee) : SEULE la requete recoit ce prefixe d'instruction - les passages
-		// eux (embed_backfill.php) sont embarques sans aucun prefixe.
-		$vector = $this->embedText('Represent this sentence for searching relevant passages: ' . $term);
+		// eux (embed_backfill.php) sont embarques sans aucun prefixe. L'expansion par
+		// synonymes elargit le CONTEXTE embarque (donc le sens capte par le vecteur),
+		// mais $term (original) reste utilise pour l'affichage/surbrillance.
+		$vector = $this->embedText('Represent this sentence for searching relevant passages: ' . $this->expandWithSynonyms($term));
 		if ($vector === null) {
 			$this->logger->error('search_hub: echec embedding de la requete (recherche neuronale)');
 			return new JSONResponse(['error' => 'search_failed'], 500);
@@ -502,11 +593,9 @@ class SearchController extends Controller {
 	 * proche mais hors-sujet, ou un candidat pertinent legerement moins proche qu'un
 	 * candidat generique).
 	 */
-	private const RERANK_TOP_N = 15;
-
 	private function rerankWithLLM(string $term, array $documents): array {
-		$topN = array_slice($documents, 0, self::RERANK_TOP_N);
-		$rest = array_slice($documents, self::RERANK_TOP_N);
+		$topN = array_slice($documents, 0, (int)$this->loadConfig()['reranking']['topN']);
+		$rest = array_slice($documents, (int)$this->loadConfig()['reranking']['topN']);
 
 		$listText = '';
 		foreach ($topN as $i => $doc) {
@@ -574,7 +663,7 @@ class SearchController extends Controller {
 
 	private function generateRaw(string $prompt): ?string {
 		$ollamaHost = $this->appConfig->getValueString('search_hub', 'ollama_host', 'http://ollama:11434');
-		$model = $this->appConfig->getValueString('search_hub', 'explain_model', 'llama3:8b');
+		$model = $this->loadConfig()['reranking']['model'];
 
 		$ch = curl_init(rtrim($ollamaHost, '/') . '/api/generate');
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -674,7 +763,7 @@ class SearchController extends Controller {
 
 	private function embedText(string $text): ?array {
 		$ollamaHost = $this->appConfig->getValueString('search_hub', 'ollama_host', 'http://ollama:11434');
-		$model = $this->appConfig->getValueString('search_hub', 'embedding_model', 'mxbai-embed-large');
+		$model = $this->loadConfig()['embedding']['model'];
 
 		// num_batch : evite le plantage Ollama "unable to fit entire input in a batch" sur
 		// un texte long (cf. embed_backfill.php) - les requetes utilisateur restent courtes

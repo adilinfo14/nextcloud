@@ -60,52 +60,54 @@
 // dossiers/cartes de demo connus du skeleton Nextcloud (deja identifies comme tels
 // ailleurs dans ce projet).
 
+// Parametres CONFIGURABLES via la console admin (Parametrage) : lus depuis
+// search_hub_config.json, avec ces valeurs comme defaut si le fichier n'existe pas
+// encore ou qu'une cle y est absente. Voir les pieges deja documentes plus haut pour
+// le RAISONNEMENT derriere chaque valeur - ce bloc ne fait que charger, pas decider.
+$configPath = __DIR__ . '/search_hub_config.json';
+$configDefaults = [
+	'embedding' => [
+		'model' => 'mxbai-embed-large',
+		'chunkSize' => 6000,
+		'chunkOverlap' => 500,
+		'chunkSizeRetry' => 350,
+		'minContentLen' => 20,
+		'maxChunksPerDoc' => 200,
+		'imageExtensions' => ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'heic', 'heif', 'webp', 'tiff', 'tif'],
+		'spreadsheetExtensions' => ['xlsx', 'xls', 'ods', 'csv'],
+		'demoPathPrefixes' => ['Modèles/', 'Templates/', 'Notes/'],
+		'demoExactTitles' => [
+			'Documents/Example.md',
+			'1. Ouvrez pour en apprendre davantage sur les tableaux et les cartes',
+			'2. Faites glisser les cartes vers la gauche et la droite, vers le haut et le bas',
+			'Créez votre première carte !',
+			'3. Appliquer un formatage riche et lier le contenu',
+			'4. Partagez, commentez et collaborez !',
+		],
+	],
+];
+
+$userConfig = file_exists($configPath) ? json_decode((string)file_get_contents($configPath), true) : null;
+$cfg = is_array($userConfig) ? array_replace_recursive($configDefaults, $userConfig) : $configDefaults;
+$embeddingCfg = $cfg['embedding'];
+
 $elasticHost = 'http://elasticsearch:9200';
 $elasticIndex = 'nextcloud_tkonsulting';
 $ollamaHost = 'http://ollama:11434';
-$model = 'mxbai-embed-large';
+$model = $embeddingCfg['model'];
 $vectorField = 'embedding_vector_v2';
 $chunkedMarker = 'chunked_v2';
 $batchSize = 20;
-$chunkSize = 6000;
-$chunkOverlap = 500;
-$chunkSizeRetry = 350;
+$chunkSize = (int)$embeddingCfg['chunkSize'];
+$chunkOverlap = (int)$embeddingCfg['chunkOverlap'];
+$chunkSizeRetry = (int)$embeddingCfg['chunkSizeRetry'];
 $embedOptions = ['num_batch' => 4096, 'num_ctx' => 4096];
-$minContentLen = 20;
-// Plafond decouvert en prod le 2026-07-14 : un vrai livre PDF de 2.8 Mo ("Intelligence
-// artificielle" de John Paul Mueller) a produit des centaines de passages a lui seul.
-// Le cout d'avoir PLUS de passages est uniquement la duree du backfill (job de fond
-// nocturne, zero impact utilisateur) - PAS la vitesse de recherche (le volume de
-// l'index n'affecte quasiment pas le temps d'une requete kNN, et les passages sont de
-// toute facon deduppliques par document parent a la lecture). Au-dela de ce plafond
-// (documents exceptionnellement volumineux), on repartit les chunks UNIFORMEMENT sur
-// tout le document (pas juste le debut) pour garder une couverture representative.
-$maxChunksPerDoc = 200;
-$imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'heic', 'heif', 'webp', 'tiff', 'tif'];
-// 5e piege trouve le 2026-07-14 (signale par l'utilisateur) : un tableur (ex.
-// odoo_contacts_1000.xlsx, 1000 lignes de contacts) matchait sans rapport sur des
-// requetes completement etrangeres. Cause differente des precedentes : ici le texte
-// EST bien reel et non-vide (pas de faux positif "contenu vide"), mais des donnees
-// TABULAIRES repetitives (colonnes nom/adresse/telephone/email) n'ont pas de "sens"
-// prosaïque a comparer - un modele d'embedding entraine sur du texte naturel produit
-// un vecteur peu fiable sur ce type de contenu structurel. Le decoupage recursif
-// (paragraphes/phrases) ne l'aide pas non plus : un tableur n'a ni ligne vide ni
-// ponctuation de fin de phrase, il retombe donc systematiquement sur le decoupage
-// brut. Exclusion des extensions tableur, meme logique que les images ci-dessus -
-// la recherche MOT-CLE reste evidemment inchangee (elle indexe toujours le contenu
-// complet, tableur inclus).
-$spreadsheetExtensions = ['xlsx', 'xls', 'ods', 'csv'];
-$demoPathPrefixes = ['Modèles/', 'Templates/', 'Notes/'];
-$demoExactTitles = [
-	'Documents/Example.md',
-	// Cartes du tableau Deck de demo "Bienvenue dans Nextcloud Deck !" (board id=1,
-	// verifie en base) - meme categorie de bruit que Modeles/Notes ci-dessus.
-	'1. Ouvrez pour en apprendre davantage sur les tableaux et les cartes',
-	'2. Faites glisser les cartes vers la gauche et la droite, vers le haut et le bas',
-	'Créez votre première carte !',
-	'3. Appliquer un formatage riche et lier le contenu',
-	'4. Partagez, commentez et collaborez !',
-];
+$minContentLen = (int)$embeddingCfg['minContentLen'];
+$maxChunksPerDoc = (int)$embeddingCfg['maxChunksPerDoc'];
+$imageExtensions = $embeddingCfg['imageExtensions'];
+$spreadsheetExtensions = $embeddingCfg['spreadsheetExtensions'];
+$demoPathPrefixes = $embeddingCfg['demoPathPrefixes'];
+$demoExactTitles = $embeddingCfg['demoExactTitles'];
 
 function esCurl(string $method, string $url, ?array $body = null): array {
 	$ch = curl_init($url);

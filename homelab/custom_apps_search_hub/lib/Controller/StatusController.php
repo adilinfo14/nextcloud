@@ -76,9 +76,18 @@ class StatusController extends Controller {
 		$providers = [];
 		$esOnline = false;
 		$totalCount = 0;
+		$indexStats = null;
 
 		if ($elasticHost !== '' && $elasticIndex !== '') {
-			$countData = $this->esInternalRequest('GET', rtrim($elasticHost, '/') . '/' . $elasticIndex . '/_count');
+			// Exclut les passages (parent_id) du compte "documents" classique - ils vivent
+			// dans le MEME index Elasticsearch mais ne sont pas des documents BM25 a part
+			// entiere (voir getEmbeddingBackfillStatus() pour leur propre compteur dedie).
+			// Sans ce filtre, ce total inclurait les ~400+ passages et deviendrait trompeur.
+			$countData = $this->esInternalRequest(
+				'POST',
+				rtrim($elasticHost, '/') . '/' . $elasticIndex . '/_count',
+				['query' => ['bool' => ['must_not' => ['exists' => ['field' => 'parent_id']]]]]
+			);
 			if ($countData !== null) {
 				$totalCount = (int)($countData['count'] ?? 0);
 				$esOnline = true;
@@ -93,6 +102,16 @@ class StatusController extends Controller {
 					$providers[] = [
 						'id' => $bucket['key'],
 						'count' => $bucket['doc_count'],
+					];
+				}
+
+				$statsData = $this->esInternalRequest('GET', rtrim($elasticHost, '/') . '/' . $elasticIndex . '/_stats/store,docs');
+				$primaries = $statsData['_all']['primaries'] ?? null;
+				if ($primaries !== null) {
+					$indexStats = [
+						'sizeBytes' => (int)($primaries['store']['size_in_bytes'] ?? 0),
+						'docCount' => (int)($primaries['docs']['count'] ?? 0),
+						'deletedDocs' => (int)($primaries['docs']['deleted'] ?? 0),
 					];
 				}
 			}
@@ -148,6 +167,7 @@ class StatusController extends Controller {
 			'elasticIndex' => $elasticIndex,
 			'totalCount' => $totalCount,
 			'providers' => $providers,
+			'indexStats' => $indexStats,
 			'recentTicks' => $recentTicks,
 			'isRunning' => $isRunning,
 			'cronLastRun' => $cronLastRun,
@@ -167,6 +187,7 @@ class StatusController extends Controller {
 	private function getEmbeddingBackfillStatus(string $elasticHost, string $elasticIndex, bool $esOnline): array {
 		$totalPassages = 0;
 		$totalChunkedDocuments = 0;
+		$providersChunked = [];
 		if ($esOnline) {
 			$passageCount = $this->esInternalRequest(
 				'POST',
@@ -175,12 +196,20 @@ class StatusController extends Controller {
 			);
 			$totalPassages = (int)($passageCount['count'] ?? 0);
 
-			$chunkedCount = $this->esInternalRequest(
+			$chunkedAgg = $this->esInternalRequest(
 				'POST',
-				rtrim($elasticHost, '/') . '/' . $elasticIndex . '/_count',
-				['query' => ['exists' => ['field' => 'chunked_v2']]]
+				rtrim($elasticHost, '/') . '/' . $elasticIndex . '/_search',
+				[
+					'size' => 0,
+					'query' => ['exists' => ['field' => 'chunked_v2']],
+					'aggs' => ['by_provider' => ['terms' => ['field' => 'provider.keyword', 'size' => 20]]],
+				]
 			);
-			$totalChunkedDocuments = (int)($chunkedCount['count'] ?? 0);
+			$chunkedBuckets = $chunkedAgg['aggregations']['by_provider']['buckets'] ?? [];
+			foreach ($chunkedBuckets as $bucket) {
+				$providersChunked[] = ['id' => $bucket['key'], 'count' => $bucket['doc_count']];
+				$totalChunkedDocuments += $bucket['doc_count'];
+			}
 		}
 
 		$statusPath = '/var/www/html/custom_apps/search_hub/embed_backfill_status.json';
@@ -192,11 +221,139 @@ class StatusController extends Controller {
 			}
 		}
 
+		$config = $this->loadSearchHubConfig();
+
 		return [
 			'totalPassages' => $totalPassages,
 			'totalChunkedDocuments' => $totalChunkedDocuments,
+			'providersChunked' => $providersChunked,
+			'vectorField' => 'embedding_vector_v2',
+			'vectorDims' => 1024,
+			'embeddingModel' => $config['embedding']['model'] ?? '-',
+			'rerankingModel' => $config['reranking']['model'] ?? '-',
 			'lastRun' => $lastRun,
 		];
+	}
+
+	private const CONFIG_PATH = '/var/www/html/custom_apps/search_hub/search_hub_config.json';
+	private const CONFIG_DEFAULTS = [
+		'embedding' => [
+			'model' => 'mxbai-embed-large',
+			'chunkSize' => 6000,
+			'chunkOverlap' => 500,
+			'chunkSizeRetry' => 350,
+			'minContentLen' => 20,
+			'maxChunksPerDoc' => 200,
+			'imageExtensions' => ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'heic', 'heif', 'webp', 'tiff', 'tif'],
+			'spreadsheetExtensions' => ['xlsx', 'xls', 'ods', 'csv'],
+			'demoPathPrefixes' => ['Modèles/', 'Templates/', 'Notes/'],
+			'demoExactTitles' => [
+				'Documents/Example.md',
+				'1. Ouvrez pour en apprendre davantage sur les tableaux et les cartes',
+				'2. Faites glisser les cartes vers la gauche et la droite, vers le haut et le bas',
+				'Créez votre première carte !',
+				'3. Appliquer un formatage riche et lier le contenu',
+				'4. Partagez, commentez et collaborez !',
+			],
+		],
+		'reranking' => ['model' => 'llama3:8b', 'topN' => 15],
+		'synonyms' => [],
+	];
+
+	/**
+	 * Meme fichier de configuration que SearchController/embed_backfill.php (source
+	 * unique, evite toute divergence entre ce qui est affiche et ce qui est reellement
+	 * utilise par le moteur).
+	 */
+	private function loadSearchHubConfig(): array {
+		if (!file_exists(self::CONFIG_PATH)) {
+			return self::CONFIG_DEFAULTS;
+		}
+		$decoded = json_decode((string)file_get_contents(self::CONFIG_PATH), true);
+		return is_array($decoded) ? array_replace_recursive(self::CONFIG_DEFAULTS, $decoded) : self::CONFIG_DEFAULTS;
+	}
+
+	public function getConfig(): JSONResponse {
+		if (!$this->isCurrentUserAdmin()) {
+			return new JSONResponse(['error' => 'forbidden'], 403);
+		}
+		return new JSONResponse($this->loadSearchHubConfig());
+	}
+
+	/**
+	 * Validation minimale mais REELLE avant ecriture (types attendus, bornes sur les
+	 * nombres) - meme reserve a un admin, on n'ecrit jamais tel quel ce qui vient d'un
+	 * formulaire cote client sur un fichier lu ensuite par un script d'indexation.
+	 */
+	private function sanitizeConfig(array $input): array {
+		$out = self::CONFIG_DEFAULTS;
+
+		if (isset($input['embedding']) && is_array($input['embedding'])) {
+			$e = $input['embedding'];
+			if (isset($e['model']) && is_string($e['model']) && $e['model'] !== '') {
+				$out['embedding']['model'] = $e['model'];
+			}
+			foreach (['chunkSize', 'chunkOverlap', 'chunkSizeRetry', 'minContentLen', 'maxChunksPerDoc'] as $key) {
+				if (isset($e[$key]) && is_numeric($e[$key])) {
+					$out['embedding'][$key] = max(1, (int)$e[$key]);
+				}
+			}
+			foreach (['imageExtensions', 'spreadsheetExtensions', 'demoPathPrefixes', 'demoExactTitles'] as $key) {
+				if (isset($e[$key]) && is_array($e[$key])) {
+					$out['embedding'][$key] = array_values(array_filter(
+						array_map('trim', array_map('strval', $e[$key])),
+						static fn ($v) => $v !== ''
+					));
+				}
+			}
+		}
+
+		if (isset($input['reranking']) && is_array($input['reranking'])) {
+			$r = $input['reranking'];
+			if (isset($r['model']) && is_string($r['model']) && $r['model'] !== '') {
+				$out['reranking']['model'] = $r['model'];
+			}
+			if (isset($r['topN']) && is_numeric($r['topN'])) {
+				$out['reranking']['topN'] = max(1, min(50, (int)$r['topN']));
+			}
+		}
+
+		if (isset($input['synonyms']) && is_array($input['synonyms'])) {
+			$groups = [];
+			foreach ($input['synonyms'] as $group) {
+				if (!is_array($group) || !isset($group['terms']) || !is_array($group['terms'])) {
+					continue;
+				}
+				$terms = array_values(array_filter(
+					array_map('trim', array_map('strval', $group['terms'])),
+					static fn ($t) => $t !== ''
+				));
+				if (count($terms) >= 2) {
+					$groups[] = ['terms' => $terms];
+				}
+			}
+			$out['synonyms'] = $groups;
+		}
+
+		return $out;
+	}
+
+	public function saveConfig(): JSONResponse {
+		if (!$this->isCurrentUserAdmin()) {
+			return new JSONResponse(['error' => 'forbidden'], 403);
+		}
+
+		$raw = file_get_contents('php://input');
+		$decoded = json_decode((string)$raw, true);
+		if (!is_array($decoded)) {
+			return new JSONResponse(['error' => 'invalid_json'], 400);
+		}
+
+		$sanitized = $this->sanitizeConfig($decoded);
+		file_put_contents(self::CONFIG_PATH, json_encode($sanitized, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+		$this->logger->info('search_hub: configuration mise a jour depuis la console admin');
+
+		return new JSONResponse(['saved' => true, 'config' => $sanitized]);
 	}
 
 	/**
@@ -251,5 +408,42 @@ class StatusController extends Controller {
 		$this->logger->info('search_hub: backfill des embeddings declenche manuellement depuis le tableau de bord admin');
 
 		return new JSONResponse(['started' => true, 'pid' => $output[0] ?? null]);
+	}
+
+	/**
+	 * Logs LISIBLES depuis la console admin : uniquement ceux ecrits DANS le conteneur
+	 * (les executions manuelles declenchees ci-dessus). Le cron quotidien du backfill
+	 * ecrit lui sur le systeme de fichiers HOTE (/home/adil/search-hub-embeddings.log,
+	 * cf. crontab) - invisible depuis PHP web, note explicitement plutot que tente une
+	 * lecture qui echouerait silencieusement.
+	 */
+	public function getLogs(): JSONResponse {
+		if (!$this->isCurrentUserAdmin()) {
+			return new JSONResponse(['error' => 'forbidden'], 403);
+		}
+
+		$logs = [];
+		$files = [
+			'reindex' => ['path' => '/tmp/search_hub_reindex.log', 'label' => 'Derniere reindexation manuelle (mot-cle)'],
+			'embedBackfill' => ['path' => '/tmp/search_hub_embed_backfill.log', 'label' => 'Dernier backfill manuel (embeddings)'],
+		];
+
+		foreach ($files as $key => $info) {
+			if (!file_exists($info['path'])) {
+				$logs[$key] = ['label' => $info['label'], 'available' => false, 'lines' => []];
+				continue;
+			}
+			$content = (string)file_get_contents($info['path']);
+			$lines = array_slice(array_filter(explode("\n", $content)), -30);
+			$logs[$key] = ['label' => $info['label'], 'available' => true, 'lines' => array_values($lines)];
+		}
+
+		return new JSONResponse([
+			'logs' => $logs,
+			'hostOnlyLogs' => [
+				'/home/adil/nextcloud-cron.log (cron BM25, 1 min)',
+				'/home/adil/search-hub-embeddings.log (cron embeddings, 4h15)',
+			],
+		]);
 	}
 }
