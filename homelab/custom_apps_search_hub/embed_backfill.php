@@ -12,6 +12,20 @@
 // dense). D'ou TEXT_MAX_LEN volontairement conservateur (800 car.) + un retry
 // automatique avec un texte encore plus court en cas d'echec, plutot que de perdre le
 // document silencieusement.
+//
+// 2e piege trouve le 2026-07-14 : un dossier (ou fichier quasi vide) n'a PAS de
+// "content" mais A un titre ("Notes", "Photos", "Mon Iphone"...) - embarquer seulement
+// ce titre produit un vecteur tres court/generique qui se retrouve, par similarite
+// cosinus, artificiellement "proche" de PRESQUE TOUTES les requetes (remonte en tete
+// de resultats sans aucun rapport). D'ou l'exigence d'un contenu REEL minimal
+// (MIN_CONTENT_LEN), independamment du titre.
+//
+// 3e piege trouve le 2026-07-14 (meme session) : files_fulltextsearch_tesseract fait
+// tourner l'OCR sur TOUTES les images (pas seulement les scans de documents) - une
+// vraie photo de vacances produit un "content" de bruit OCR (ex: "ES PE hn\n\nere =")
+// qui passe le filtre MIN_CONTENT_LEN mais n'a evidemment aucun sens. D'ou l'exclusion
+// explicite des extensions image (les photos n'ont rien a faire dans une recherche
+// SEMANTIQUE par definition - aucun contenu textuel reel a comparer).
 
 $elasticHost = 'http://elasticsearch:9200';
 $elasticIndex = 'nextcloud_tkonsulting';
@@ -20,6 +34,8 @@ $model = 'nomic-embed-text';
 $batchSize = 30;
 $textMaxLen = 800;
 $textMaxLenRetry = 300;
+$minContentLen = 20;
+$imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'heic', 'heif', 'webp', 'tiff', 'tif'];
 
 function esCurl(string $method, string $url, ?array $body = null): array {
 	$ch = curl_init($url);
@@ -93,11 +109,22 @@ while (true) {
 		$parts = $source['parts'] ?? [];
 		$partsText = is_array($parts) ? implode(' ', array_filter($parts, 'is_string')) : '';
 
-		$fullText = trim($title . "\n" . $content . ' ' . $partsText);
-		if ($fullText === '') {
+		$ext = strtolower(pathinfo($title, PATHINFO_EXTENSION));
+		if (in_array($ext, $imageExtensions, true)) {
 			$skipped++;
 			continue;
 		}
+
+		$realContent = trim($content . ' ' . $partsText);
+		if (mb_strlen($realContent) < $minContentLen) {
+			// Pas de contenu reel (dossier, fichier vide/quasi-vide) : on ne calcule PAS
+			// d'embedding pour ce document plutot que d'embarquer juste son titre (voir le
+			// 2e piege documente plus haut) - il n'apparaitra jamais en recherche par sens,
+			// ce qui est correct puisqu'il n'a aucun "sens" a comparer.
+			$skipped++;
+			continue;
+		}
+		$fullText = trim($title . "\n" . $content . ' ' . $partsText);
 
 		$vector = embed($ollamaHost, $model, 'search_document: ' . mb_substr($fullText, 0, $textMaxLen));
 		if ($vector === null) {
