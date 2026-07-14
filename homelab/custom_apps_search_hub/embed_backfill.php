@@ -442,3 +442,15 @@ while (true) {
 }
 
 echo "Termine. processed=$processed documents=$documentsChunked passages=$passagesCreated skipped=$skipped errors=$errors\n";
+
+// Statut ecrit DANS le conteneur (pas seulement dans le log cote hote, illisible depuis
+// PHP web) pour que le tableau de bord admin de search_hub (StatusController) puisse
+// afficher "derniere execution" sans avoir besoin d'un acces au systeme de fichiers hote.
+file_put_contents('/var/www/html/custom_apps/search_hub/embed_backfill_status.json', json_encode([
+	'finishedAt' => time(),
+	'processed' => $processed,
+	'documentsChunked' => $documentsChunked,
+	'passagesCreated' => $passagesCreated,
+	'skipped' => $skipped,
+	'errors' => $errors,
+]));

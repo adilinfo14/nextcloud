@@ -53,6 +53,38 @@
 		html += '<tr><td>Reindexation manuelle en cours</td><td>' + (data.isRunning ? '<strong>Oui, en cours...</strong>' : 'Non') + '</td></tr>';
 		html += '</tbody></table>';
 
+		html += '<h3>Recherche par sens (embeddings)</h3>';
+		var eb = data.embeddingBackfill || {};
+		var lastRun = eb.lastRun;
+		html += '<table class="nss-table"><tbody>';
+		html += '<tr><td>Passages indexes (recherche par sens)</td><td>' + (eb.totalPassages || 0) + '</td></tr>';
+		html += '<tr><td>Documents source ayant des passages</td><td>' + (eb.totalChunkedDocuments || 0) + '</td></tr>';
+		html += '<tr><td>Cron du backfill (quotidien, 4h15)</td><td>derniere execution : ' +
+			(lastRun ? esc(fmtDate(lastRun.finishedAt)) : 'jamais') + '</td></tr>';
+		if (lastRun) {
+			html += '<tr><td>Resultat de la derniere execution</td><td>' +
+				lastRun.documentsChunked + ' document(s), ' + lastRun.passagesCreated + ' passage(s) crees, ' +
+				lastRun.skipped + ' ignores, ' + lastRun.errors + ' erreur(s)</td></tr>';
+		}
+		html += '</tbody></table>';
+		html += '<button id="nss-embed-reindex-btn" class="button">Lancer le backfill des embeddings maintenant</button>';
+
+		html += '<h3>Connecteurs</h3>';
+		html += '<p class="settings-hint">Une source de contenu indexee dans Recherche+ (chaque connecteur alimente a la fois la recherche mot-cle et la recherche par sens).</p>';
+		var connectors = data.connectors || { active: [], proposed: [] };
+		html += '<table class="nss-table"><thead><tr><th>Connecteur</th><th>Type</th></tr></thead><tbody>';
+		connectors.active.forEach(function (c) {
+			html += '<tr><td>✅ ' + esc(c.label) + '</td><td>' + esc(c.type) + '</td></tr>';
+		});
+		html += '</tbody></table>';
+		if (connectors.proposed && connectors.proposed.length) {
+			html += '<table class="nss-table"><thead><tr><th>Connecteur propose (pas encore construit)</th><th>Ce qu\'il faudrait</th></tr></thead><tbody>';
+			connectors.proposed.forEach(function (c) {
+				html += '<tr><td>◻️ ' + esc(c.label) + '</td><td>' + esc(c.reason) + '</td></tr>';
+			});
+			html += '</tbody></table>';
+		}
+
 		if (data.recentTicks && data.recentTicks.length) {
 			html += '<h3>5 dernieres executions</h3>';
 			html += '<table class="nss-table"><thead><tr><th>Source</th><th>Statut</th><th>Action</th><th>Quand</th></tr></thead><tbody>';
@@ -70,6 +102,11 @@
 		var btn = document.getElementById('nss-reindex-btn');
 		if (btn) {
 			btn.addEventListener('click', triggerReindex);
+		}
+
+		var embedBtn = document.getElementById('nss-embed-reindex-btn');
+		if (embedBtn) {
+			embedBtn.addEventListener('click', triggerEmbedReindex);
 		}
 	}
 
@@ -98,6 +135,20 @@
 			headers: { requesttoken: OC.requestToken },
 		}).then(function () {
 			load();
+		});
+	}
+
+	function triggerEmbedReindex() {
+		var btn = document.getElementById('nss-embed-reindex-btn');
+		if (btn) {
+			btn.disabled = true;
+			btn.textContent = 'Backfill lance en tache de fond...';
+		}
+		fetch(OC.generateUrl('/apps/search_hub/admin/reindex-embeddings'), {
+			method: 'POST',
+			headers: { requesttoken: OC.requestToken },
+		}).then(function () {
+			setTimeout(load, 3000);
 		});
 	}
 
