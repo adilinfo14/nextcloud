@@ -176,6 +176,43 @@
 	border-inline-start-color: var(--color-primary-element);
 }
 
+.sh-filter-option-tree {
+	justify-content: space-between;
+}
+
+.sh-filter-option-left {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.sh-filter-option-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sh-tree-toggle {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 14px;
+	flex-shrink: 0;
+	color: var(--color-text-maxcontrast);
+	cursor: pointer;
+}
+
+.sh-tree-toggle:hover {
+	color: var(--color-main-text);
+}
+
+.sh-tree-toggle-spacer {
+	display: inline-block;
+	width: 14px;
+	flex-shrink: 0;
+}
+
 .sh-filter-option .sh-count {
 	color: var(--color-text-maxcontrast);
 	font-size: 12px;

@@ -38,6 +38,8 @@
 	var HISTORY_KEY = 'sh-search-history';
 	var HISTORY_MAX = 10;
 
+	var expandedCollectives = {};
+
 	var PROVIDER_LABELS = { files: 'Fichiers', collectives: 'Wiki', deck: 'Deck' };
 	var TYPE_LABELS = {
 		pdf: 'PDF', image: 'Image', document: 'Document texte', tableur: 'Tableur',
@@ -219,15 +221,29 @@
 		var html = '<div class="sh-filter-group"><h4>Collective</h4>';
 		Object.keys(collectives).forEach(function (key) {
 			var active = state.collective === key ? ' active' : '';
-			html += '<div class="sh-filter-option' + active + '" data-key="collective" data-value="' + esc(key) + '">' +
-				'<span>' + esc(key) + '</span><span class="sh-count">' + collectives[key] + '</span></div>';
-
 			var chapters = (chaptersByCollective && chaptersByCollective[key]) || {};
-			Object.keys(chapters).forEach(function (chapterKey) {
-				var chapterActive = state.chapter === chapterKey ? ' active' : '';
-				html += '<div class="sh-filter-option sh-filter-suboption' + chapterActive + '" data-key="chapter" data-value="' + esc(chapterKey) + '">' +
-					'<span>' + esc(chapterKey) + '</span><span class="sh-count">' + chapters[chapterKey] + '</span></div>';
-			});
+			var hasChapters = Object.keys(chapters).length > 0;
+			// Repliee par defaut, sauf si l'utilisateur l'a explicitement depliee ou si
+			// cette collective est le filtre actif (se deplie automatiquement en la
+			// selectionnant, se replie pas forcement en la deselectionnant).
+			var isExpanded = !!expandedCollectives[key] || state.collective === key;
+
+			var toggleHtml = hasChapters
+				? '<span class="sh-tree-toggle" data-collective="' + esc(key) + '">' + (isExpanded ? '▾' : '▸') + '</span>'
+				: '<span class="sh-tree-toggle-spacer"></span>';
+
+			html += '<div class="sh-filter-option sh-filter-option-tree' + active + '" data-key="collective" data-value="' + esc(key) + '">' +
+				'<span class="sh-filter-option-left">' + toggleHtml +
+				'<span class="sh-filter-option-label">' + esc(key) + '</span></span>' +
+				'<span class="sh-count">' + collectives[key] + '</span></div>';
+
+			if (hasChapters && isExpanded) {
+				Object.keys(chapters).forEach(function (chapterKey) {
+					var chapterActive = state.chapter === chapterKey ? ' active' : '';
+					html += '<div class="sh-filter-option sh-filter-suboption' + chapterActive + '" data-key="chapter" data-value="' + esc(chapterKey) + '">' +
+						'<span>' + esc(chapterKey) + '</span><span class="sh-count">' + chapters[chapterKey] + '</span></div>';
+				});
+			}
 		});
 		html += '</div>';
 		return html;
@@ -248,6 +264,18 @@
 		html += renderFilterGroup('Periode', facets.periods, PERIOD_LABELS, 'period');
 
 		filtersEl.innerHTML = html;
+
+		Array.prototype.forEach.call(filtersEl.querySelectorAll('.sh-tree-toggle'), function (el) {
+			el.addEventListener('click', function (ev) {
+				// stopPropagation : le chevron est imbrique dans le .sh-filter-option
+				// cliquable (filtre) - sans ca, un clic sur le chevron declencherait
+				// AUSSI le filtre de la collective, en plus du depli/repli.
+				ev.stopPropagation();
+				var key = el.getAttribute('data-collective');
+				expandedCollectives[key] = !expandedCollectives[key];
+				renderFilters();
+			});
+		});
 
 		Array.prototype.forEach.call(filtersEl.querySelectorAll('.sh-filter-option'), function (el) {
 			el.addEventListener('click', function () {
