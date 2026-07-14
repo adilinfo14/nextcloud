@@ -187,8 +187,12 @@
 		var total = lastData ? lastData.totalUnfiltered : 0;
 
 		var tabs = [{ id: '', label: 'Tous', count: total }];
-		['files', 'collectives', 'deck', 'iaeasy'].forEach(function (p) {
-			tabs.push({ id: p, label: PROVIDER_LABELS[p], count: facets.providers[p] || 0 });
+		// Liste des connecteurs fournie par le backend (SearchController::ALL_PROVIDERS)
+		// plutot qu'un tableau fige ici - un onglet manquant a deja ete rate une fois
+		// (confia_doc oublie de cette liste le 2026-07-14) faute de source unique.
+		var providers = (lastData && lastData.allProviders) || ['files', 'collectives', 'deck'];
+		providers.forEach(function (p) {
+			tabs.push({ id: p, label: PROVIDER_LABELS[p] || p, count: facets.providers[p] || 0 });
 		});
 
 		tabsEl.innerHTML = tabs.map(function (t) {

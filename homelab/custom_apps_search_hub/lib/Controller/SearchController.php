@@ -35,6 +35,17 @@ class SearchController extends Controller {
 	 */
 	private const EXTERNAL_PROVIDERS = ['iaeasy', 'confia_doc'];
 
+	/**
+	 * Liste CANONIQUE de tous les connecteurs (natifs + externes), renvoyee au
+	 * frontend (cle "allProviders") pour qu'il affiche un onglet par source SANS
+	 * dupliquer cette liste en dur cote JS - piege deja vecu le 2026-07-14 : le
+	 * tableau ['files','collectives','deck','iaeasy'] cote main.js avait ete oublie
+	 * de mise a jour a l'ajout de confia_doc, rendant son onglet invisible (les
+	 * resultats existaient bien, juste aucun onglet pour les filtrer). Une seule
+	 * source de verite ici evite que ca se reproduise a l'ajout d'un 3e connecteur.
+	 */
+	private const ALL_PROVIDERS = ['files', 'collectives', 'deck', 'iaeasy', 'confia_doc'];
+
 	private const MAX_TERM_LENGTH = 300;
 	private const PAGE_SIZE = 60;
 	private const RAW_FETCH_SIZE = 500;
@@ -343,6 +354,7 @@ class SearchController extends Controller {
 			'totalPages' => $totalPages,
 			'weightsUsed' => $weights,
 			'isAdmin' => $this->groupManager->isAdmin($user->getUID()),
+			'allProviders' => self::ALL_PROVIDERS,
 		]);
 	}
 
@@ -558,6 +570,7 @@ class SearchController extends Controller {
 			'totalPages' => $totalPages,
 			'isAdmin' => $this->groupManager->isAdmin($user->getUID()),
 			'neural' => true,
+			'allProviders' => self::ALL_PROVIDERS,
 		]);
 	}
 
