@@ -41,7 +41,7 @@
 	var expandedCollectives = {};
 	var expandedGroups = {};
 
-	var PROVIDER_LABELS = { files: 'Fichiers', collectives: 'Wiki', deck: 'Deck', iaeasy: 'iaeasy', confia_doc: 'ConfIA (doc technique)' };
+	var PROVIDER_LABELS = { files: 'Fichiers', collectives: 'Wiki', deck: 'Deck', iaeasy: 'iaeasy', confia_doc: 'Lesensia (doc technique)' };
 	var TYPE_LABELS = {
 		pdf: 'PDF', image: 'Image', document: 'Document texte', tableur: 'Tableur',
 		presentation: 'Presentation', texte: 'Texte', 'page-wiki': 'Page wiki', carte: 'Carte Deck', autre: 'Autre',

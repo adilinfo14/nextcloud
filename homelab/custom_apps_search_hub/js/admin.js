@@ -34,7 +34,7 @@
 	}
 
 	function providerLabel(id) {
-		var labels = { files: 'Fichiers', deck: 'Deck', collectives: 'Wiki (Collectives)', iaeasy: 'iaeasy.noschoixpourvous.com', confia_doc: 'ConfIA/Lesensia (doc technique)' };
+		var labels = { files: 'Fichiers', deck: 'Deck', collectives: 'Wiki (Collectives)', iaeasy: 'iaeasy.noschoixpourvous.com', confia_doc: 'Lesensia (doc technique)' };
 		return labels[id] || id;
 	}
 

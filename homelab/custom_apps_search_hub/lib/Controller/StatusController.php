@@ -389,7 +389,7 @@ class StatusController extends Controller {
 				['id' => 'collectives', 'label' => 'Wiki (Collectives)', 'type' => 'Connecteur custom (fulltextsearch_collectives, developpe pour ce projet)'],
 				['id' => 'deck', 'label' => 'Deck', 'type' => 'Application Nextcloud native (IFullTextSearchProvider)'],
 				['id' => 'iaeasy', 'label' => 'iaeasy.noschoixpourvous.com', 'type' => 'Connecteur custom (iaeasy_index.php, indexation directe ES depuis l\'API publique - pas un IFullTextSearchProvider)'],
-				['id' => 'confia_doc', 'label' => 'ConfIA/Lesensia - doc technique', 'type' => 'Connecteur custom (confia_doc_index.php, export pousse via Tailscale - doc/endpoints/schema DB uniquement, pas de donnees client)'],
+				['id' => 'confia_doc', 'label' => 'Lesensia - doc technique', 'type' => 'Connecteur custom (confia_doc_index.php, export pousse via Tailscale - doc/endpoints/schema DB uniquement, pas de donnees client)'],
 			],
 			'proposed' => [],
 		];
