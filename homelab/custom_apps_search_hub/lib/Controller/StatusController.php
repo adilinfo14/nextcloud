@@ -367,12 +367,20 @@ class StatusController extends Controller {
 	/**
 	 * Rend explicite la notion de "connecteur" (une source de contenu indexee dans
 	 * Recherche+) - demande utilisateur du 2026-07-14 : montrer clairement ce qui EST
-	 * connecte aujourd'hui, et ce qui pourrait l'etre. iaeasy.noschoixpourvous.com est
-	 * passe de "propose" a "actif" le meme jour (iaeasy_index.php) : ce n'est PAS un
-	 * IFullTextSearchProvider (application separee, FastAPI/Python) mais un connecteur
-	 * d'un genre different - indexation directe dans Elasticsearch depuis l'API
-	 * publique de ce site (7 sources : catalogue, gabarits/briques du Constructeur,
-	 * scenarios d'entrainement, glossaire, metiers, securite, videos).
+	 * connecte aujourd'hui, et ce qui pourrait l'etre. Deux connecteurs "externes"
+	 * (pas des IFullTextSearchProvider) ajoutes le meme jour :
+	 * - iaeasy.noschoixpourvous.com (iaeasy_index.php) : indexation directe ES depuis
+	 *   l'API publique de ce site (catalogue, gabarits/briques, scenarios,
+	 *   glossaire, metiers, securite, videos).
+	 * - confia_doc (confia_doc_index.php) : documentation TECHNIQUE de ConfIA/
+	 *   Lesensia (docs .md, endpoints API, schema DB) - volontairement PAS les
+	 *   donnees metier (devis/factures/clients), qui sont multi-tenant et
+	 *   necessiteraient de resoudre le cloisonnement entre artisans avant toute
+	 *   indexation (choix utilisateur explicite). Source = export JSON pousse
+	 *   depuis le VPS ConfIA via le meme lien Tailscale/cle SSH que les backups
+	 *   (confia-doc-export-push.sh, cron 03:45), PAS un appel HTTP direct comme
+	 *   iaeasy (cette doc n'a pas d'API publique, et l'exposer publiquement serait
+	 *   un risque de securite - schema DB + toutes les routes API).
 	 */
 	private function getConnectors(): array {
 		return [
@@ -381,6 +389,7 @@ class StatusController extends Controller {
 				['id' => 'collectives', 'label' => 'Wiki (Collectives)', 'type' => 'Connecteur custom (fulltextsearch_collectives, developpe pour ce projet)'],
 				['id' => 'deck', 'label' => 'Deck', 'type' => 'Application Nextcloud native (IFullTextSearchProvider)'],
 				['id' => 'iaeasy', 'label' => 'iaeasy.noschoixpourvous.com', 'type' => 'Connecteur custom (iaeasy_index.php, indexation directe ES depuis l\'API publique - pas un IFullTextSearchProvider)'],
+				['id' => 'confia_doc', 'label' => 'ConfIA/Lesensia - doc technique', 'type' => 'Connecteur custom (confia_doc_index.php, export pousse via Tailscale - doc/endpoints/schema DB uniquement, pas de donnees client)'],
 			],
 			'proposed' => [],
 		];
@@ -438,6 +447,29 @@ class StatusController extends Controller {
 	}
 
 	/**
+	 * Synchronisation du connecteur confia_doc : reindexe depuis l'export JSON DEJA
+	 * present dans le conteneur (confia_doc_export.json) - contrairement a iaeasy,
+	 * ce declenchement manuel ne force PAS un nouvel export cote ConfIA (le
+	 * docker cp depuis le host est un pas HOTE separe, hors de portee de PHP dans
+	 * le conteneur Nextcloud) : utile pour rejouer l'indexation apres une erreur ou
+	 * confirmer la fraicheur d'un export deja pousse par le cron ConfIA (03:45).
+	 */
+	public function reindexConfiaDoc(): JSONResponse {
+		if (!$this->isCurrentUserAdmin()) {
+			return new JSONResponse(['error' => 'forbidden'], 403);
+		}
+
+		$logPath = '/tmp/search_hub_confia_doc_index.log';
+		$cmd = 'nohup php /var/www/html/custom_apps/search_hub/confia_doc_index.php > '
+			. escapeshellarg($logPath) . ' 2>&1 & echo $!';
+
+		exec($cmd, $output);
+		$this->logger->info('search_hub: synchronisation confia_doc declenchee manuellement depuis le tableau de bord admin');
+
+		return new JSONResponse(['started' => true, 'pid' => $output[0] ?? null]);
+	}
+
+	/**
 	 * Logs LISIBLES depuis la console admin : uniquement ceux ecrits DANS le conteneur
 	 * (les executions manuelles declenchees ci-dessus). Le cron quotidien du backfill
 	 * ecrit lui sur le systeme de fichiers HOTE (/home/adil/search-hub-embeddings.log,
@@ -454,6 +486,7 @@ class StatusController extends Controller {
 			'reindex' => ['path' => '/tmp/search_hub_reindex.log', 'label' => 'Derniere reindexation manuelle (mot-cle)'],
 			'embedBackfill' => ['path' => '/tmp/search_hub_embed_backfill.log', 'label' => 'Dernier backfill manuel (embeddings)'],
 			'iaeasyIndex' => ['path' => '/tmp/search_hub_iaeasy_index.log', 'label' => 'Derniere synchronisation iaeasy'],
+			'confiaDocIndex' => ['path' => '/tmp/search_hub_confia_doc_index.log', 'label' => 'Derniere synchronisation confia_doc'],
 		];
 
 		foreach ($files as $key => $info) {
@@ -472,6 +505,7 @@ class StatusController extends Controller {
 				'/home/adil/nextcloud-cron.log (cron BM25, 1 min)',
 				'/home/adil/search-hub-embeddings.log (cron embeddings, 4h15)',
 				'/home/adil/search-hub-iaeasy.log (cron connecteur iaeasy, 4h30)',
+				'/home/adil/search-hub-confia-doc.log (cron connecteur confia_doc, 4h35 - cote VPS ConfIA : /var/log/confia-doc-export.log, export+push 3h45)',
 			],
 		]);
 	}

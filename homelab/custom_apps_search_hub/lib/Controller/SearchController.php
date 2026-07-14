@@ -26,6 +26,15 @@ class SearchController extends Controller {
 		'the', 'a', 'an', 'of', 'to', 'in', 'and', 'or', 'is', 'are',
 	];
 
+	/**
+	 * Connecteurs qui ne sont PAS des IFullTextSearchProvider Nextcloud - leurs
+	 * documents vivent dans le meme index ES (provider=<id>, champ "external_link"
+	 * pour le lien de resultat) mais doivent etre cherches via des requetes ES
+	 * directes (voir fetchExternalKeywordMatches()) plutot que via
+	 * IFullTextSearchManager, qui ne les connait pas.
+	 */
+	private const EXTERNAL_PROVIDERS = ['iaeasy', 'confia_doc'];
+
 	private const MAX_TERM_LENGTH = 300;
 	private const PAGE_SIZE = 60;
 	private const RAW_FETCH_SIZE = 500;
@@ -269,16 +278,17 @@ class SearchController extends Controller {
 			}
 		}
 
-		// Connecteur iaeasy.noschoixpourvous.com (2026-07-14) : application separee, pas
-		// une app Nextcloud - IFullTextSearchManager ne le connait pas (aucun
-		// IFullTextSearchProvider enregistre), donc ses documents (indexes directement
-		// dans le MEME index ES par iaeasy_index.php, provider="iaeasy") ne remontent
-		// jamais via l'appel ci-dessus. On va les chercher separement par une requete ES
-		// directe et on les fusionne dans le meme tableau $documents - tout le reste du
-		// pipeline (facettes, ponderation, tri, filtres) les traite alors comme n'importe
-		// quel autre resultat.
-		foreach ($this->fetchIaeasyKeywordMatches($expandedTerm, $term) as $iaeasyDoc) {
-			$documents[] = $iaeasyDoc;
+		// Connecteurs "externes" (2026-07-14 : iaeasy.noschoixpourvous.com, puis
+		// confia_doc) : applications/sources separees, pas des app Nextcloud -
+		// IFullTextSearchManager ne les connait pas (aucun IFullTextSearchProvider
+		// enregistre), donc leurs documents (indexes directement dans le MEME index ES
+		// par leur script d'indexation respectif, voir self::EXTERNAL_PROVIDERS) ne
+		// remontent jamais via l'appel ci-dessus. On va les chercher separement par une
+		// requete ES directe et on les fusionne dans le meme tableau $documents - tout
+		// le reste du pipeline (facettes, ponderation, tri, filtres) les traite alors
+		// comme n'importe quel autre resultat.
+		foreach ($this->fetchExternalKeywordMatches($expandedTerm, $term) as $externalDoc) {
+			$documents[] = $externalDoc;
 		}
 
 		// Contournement de la limite ci-dessus : on va chercher les metatags (chapitre
@@ -469,10 +479,12 @@ class SearchController extends Controller {
 			}
 
 			$tags = $meta['tags'];
-			// iaeasy n'a pas de route Nextcloud a resoudre (resolveNeuralLink() ne connait
-			// que files/collectives/deck) - le lien absolu est deja stocke sur le document
-			// parent par iaeasy_index.php (voir fetchParentMetadata()).
-			$link = $providerId === 'iaeasy' ? ($meta['iaeasyLink'] ?? '') : $this->resolveNeuralLink($providerId, $documentId);
+			$isExternal = in_array($providerId, self::EXTERNAL_PROVIDERS, true);
+			// Un connecteur externe n'a pas de route Nextcloud a resoudre
+			// (resolveNeuralLink() ne connait que files/collectives/deck) - le lien
+			// absolu est deja stocke sur le document parent (champ "external_link",
+			// voir fetchParentMetadata()) par le script d'indexation du connecteur.
+			$link = $isExternal ? ($meta['externalLink'] ?? '') : $this->resolveNeuralLink($providerId, $documentId);
 			$matchedTerms = $this->computeMatchedTerms($term, $title, [$best['chunkText']], $tags);
 
 			$documents[] = [
@@ -487,7 +499,7 @@ class SearchController extends Controller {
 				'matchedTerms' => $matchedTerms,
 				'titleMatch' => !empty($this->computeMatchedTerms($term, $title, [], [])),
 				'collective' => $this->extractCollectiveFromLink($providerId, $link),
-				'fileType' => $providerId === 'iaeasy' ? $this->iaeasyFileType($tags) : $this->extractFileType($providerId, $title),
+				'fileType' => $isExternal ? $this->externalFileType($tags) : $this->extractFileType($providerId, $title),
 				'chapter' => null,
 			];
 		}
@@ -565,7 +577,7 @@ class SearchController extends Controller {
 			return [];
 		}
 
-		$docs = array_map(static fn ($id) => ['_id' => $id, '_source' => ['title', 'tags', 'lastModified', 'iaeasy_link']], $parentIds);
+		$docs = array_map(static fn ($id) => ['_id' => $id, '_source' => ['title', 'tags', 'lastModified', 'external_link']], $parentIds);
 
 		$ch = curl_init(rtrim($elasticHost, '/') . '/' . $elasticIndex . '/_mget');
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -593,7 +605,7 @@ class SearchController extends Controller {
 				'title' => (string)($source['title'] ?? ''),
 				'tags' => is_array($tags) ? $tags : [],
 				'lastModified' => (int)($source['lastModified'] ?? 0),
-				'iaeasyLink' => (string)($source['iaeasy_link'] ?? ''),
+				'externalLink' => (string)($source['external_link'] ?? ''),
 			];
 		}
 
@@ -601,16 +613,17 @@ class SearchController extends Controller {
 	}
 
 	/**
-	 * Recherche mot-cle sur les documents du connecteur iaeasy (voir commentaire dans
-	 * search()) : requete ES directe filtree sur provider="iaeasy" (les passages n'ont
-	 * jamais ce champ - seuls les documents PARENTS l'ont - donc le filtre les exclut
-	 * naturellement, pas besoin d'un must_not exists parent_id supplementaire). $term
-	 * ORIGINAL (pas $expandedTerm) sert uniquement au calcul de matchedTerms/titleMatch,
-	 * comme partout ailleurs dans cette classe.
+	 * Recherche mot-cle sur les documents des connecteurs EXTERNES (voir commentaire
+	 * dans search() et self::EXTERNAL_PROVIDERS) : requete ES directe filtree sur
+	 * provider IN (iaeasy, confia_doc, ...) - les passages n'ont jamais ce champ
+	 * (seuls les documents PARENTS l'ont), donc le filtre les exclut naturellement,
+	 * pas besoin d'un must_not exists parent_id supplementaire. $term ORIGINAL (pas
+	 * $expandedTerm) sert uniquement au calcul de matchedTerms/titleMatch, comme
+	 * partout ailleurs dans cette classe.
 	 *
 	 * @return array<int, array<string, mixed>>
 	 */
-	private function fetchIaeasyKeywordMatches(string $expandedTerm, string $term): array {
+	private function fetchExternalKeywordMatches(string $expandedTerm, string $term): array {
 		$elasticHost = $this->appConfig->getValueString('fulltextsearch_elasticsearch', 'elastic_host', '', true);
 		$elasticIndex = $this->appConfig->getValueString('fulltextsearch_elasticsearch', 'elastic_index', '', true);
 		if ($elasticHost === '' || $elasticIndex === '') {
@@ -619,11 +632,11 @@ class SearchController extends Controller {
 
 		$query = [
 			'size' => 100,
-			'_source' => ['title', 'content', 'tags', 'lastModified', 'iaeasy_link'],
+			'_source' => ['title', 'content', 'tags', 'lastModified', 'external_link', 'provider'],
 			'query' => [
 				'bool' => [
 					'must' => [['multi_match' => ['query' => $expandedTerm, 'fields' => ['title^2', 'content']]]],
-					'filter' => [['term' => ['provider.keyword' => 'iaeasy']]],
+					'filter' => [['terms' => ['provider.keyword' => self::EXTERNAL_PROVIDERS]]],
 				],
 			],
 		];
@@ -648,8 +661,9 @@ class SearchController extends Controller {
 		$documents = [];
 		foreach ($hits as $hit) {
 			$source = $hit['_source'] ?? [];
-			$fullId = (string)$hit['_id']; // "iaeasy:<source>:<itemId>"
-			$documentId = mb_substr($fullId, mb_strlen('iaeasy:'));
+			$providerId = (string)($source['provider'] ?? '');
+			$fullId = (string)$hit['_id']; // "<provider>:<...>"
+			$documentId = mb_substr($fullId, mb_strlen($providerId . ':'));
 			$title = (string)($source['title'] ?? '');
 			$content = (string)($source['content'] ?? '');
 			$tags = is_array($source['tags'] ?? null) ? $source['tags'] : [];
@@ -657,9 +671,9 @@ class SearchController extends Controller {
 
 			$documents[] = [
 				'id' => $documentId,
-				'providerId' => 'iaeasy',
+				'providerId' => $providerId,
 				'title' => $title,
-				'link' => (string)($source['iaeasy_link'] ?? 'https://iaeasy.noschoixpourvous.com'),
+				'link' => (string)($source['external_link'] ?? ''),
 				'modifiedTime' => (int)($source['lastModified'] ?? 0),
 				'tags' => $tags,
 				'excerpts' => $excerpt !== '' ? [$excerpt] : [],
@@ -667,7 +681,7 @@ class SearchController extends Controller {
 				'matchedTerms' => $this->computeMatchedTerms($term, $title, [$excerpt], $tags, $content),
 				'titleMatch' => !empty($this->computeMatchedTerms($term, $title, [], [])),
 				'collective' => null,
-				'fileType' => $this->iaeasyFileType($tags),
+				'fileType' => $this->externalFileType($tags),
 				'chapter' => null,
 			];
 		}
@@ -676,19 +690,25 @@ class SearchController extends Controller {
 	}
 
 	/**
-	 * Le "type de document" affiche pour un resultat iaeasy vient du "subtype" pose
-	 * par iaeasy_index.php dans le champ tags (ex: "modele", "glossaire", "metier") -
-	 * PAS de extractFileType() (pensee pour une extension de fichier, non pertinente
-	 * ici puisque ce ne sont jamais de vrais fichiers).
+	 * Le "type de document" affiche pour un resultat d'un connecteur EXTERNE vient
+	 * du "subtype" pose par le script d'indexation dans le champ tags (ex: "modele",
+	 * "glossaire", "metier" pour iaeasy ; "doc", "endpoint", "schema" pour
+	 * confia_doc) - PAS de extractFileType() (pensee pour une extension de fichier,
+	 * non pertinente ici puisque ce ne sont jamais de vrais fichiers). Les deux
+	 * connecteurs utilisent des vocabulaires de subtype disjoints, une seule table
+	 * de correspondance suffit.
 	 */
-	private function iaeasyFileType(array $tags): string {
+	private function externalFileType(array $tags): string {
 		$labels = [
+			// iaeasy
 			'modele' => 'modele-ia', 'gabarit' => 'gabarit-agent', 'brique' => 'brique-agent',
 			'scenario' => 'scenario-entrainement', 'glossaire' => 'glossaire', 'metier' => 'metier',
 			'securite' => 'securite', 'video' => 'video',
+			// confia_doc
+			'doc' => 'doc-technique', 'endpoint' => 'endpoint-api', 'schema' => 'table-db',
 		];
 		$subtype = $tags[0] ?? '';
-		return $labels[$subtype] ?? 'iaeasy';
+		return $labels[$subtype] ?? 'externe';
 	}
 
 	/**

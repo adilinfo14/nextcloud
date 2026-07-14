@@ -34,7 +34,7 @@
 	}
 
 	function providerLabel(id) {
-		var labels = { files: 'Fichiers', deck: 'Deck', collectives: 'Wiki (Collectives)', iaeasy: 'iaeasy.noschoixpourvous.com' };
+		var labels = { files: 'Fichiers', deck: 'Deck', collectives: 'Wiki (Collectives)', iaeasy: 'iaeasy.noschoixpourvous.com', confia_doc: 'ConfIA/Lesensia (doc technique)' };
 		return labels[id] || id;
 	}
 
@@ -122,7 +122,11 @@
 			html += '</tbody></table>';
 		}
 		if (connectors.active.some(function (c) { return c.id === 'iaeasy'; })) {
-			html += '<button id="nss-iaeasy-reindex-btn" class="button">Synchroniser iaeasy maintenant</button>';
+			html += '<button id="nss-iaeasy-reindex-btn" class="button">Synchroniser iaeasy maintenant</button> ';
+		}
+		if (connectors.active.some(function (c) { return c.id === 'confia_doc'; })) {
+			html += '<button id="nss-confia-doc-reindex-btn" class="button">Synchroniser confia_doc maintenant</button>';
+			html += '<p class="settings-hint">Reindexe depuis l\'export deja present (ne force pas un nouvel export cote ConfIA - celui-ci arrive via le cron VPS de 3h45).</p>';
 		}
 
 		// --- Connecteurs natifs (OCR / groupfolders) ---
@@ -174,6 +178,11 @@
 		var iaeasyBtn = document.getElementById('nss-iaeasy-reindex-btn');
 		if (iaeasyBtn) {
 			iaeasyBtn.addEventListener('click', triggerIaeasyReindex);
+		}
+
+		var confiaDocBtn = document.getElementById('nss-confia-doc-reindex-btn');
+		if (confiaDocBtn) {
+			confiaDocBtn.addEventListener('click', triggerConfiaDocReindex);
 		}
 
 		loadLogs();
@@ -229,6 +238,20 @@
 			btn.textContent = 'Synchronisation iaeasy en tache de fond...';
 		}
 		fetch(OC.generateUrl('/apps/search_hub/admin/reindex-iaeasy'), {
+			method: 'POST',
+			headers: { requesttoken: OC.requestToken },
+		}).then(function () {
+			setTimeout(load, 3000);
+		});
+	}
+
+	function triggerConfiaDocReindex() {
+		var btn = document.getElementById('nss-confia-doc-reindex-btn');
+		if (btn) {
+			btn.disabled = true;
+			btn.textContent = 'Synchronisation confia_doc en tache de fond...';
+		}
+		fetch(OC.generateUrl('/apps/search_hub/admin/reindex-confia-doc'), {
 			method: 'POST',
 			headers: { requesttoken: OC.requestToken },
 		}).then(function () {

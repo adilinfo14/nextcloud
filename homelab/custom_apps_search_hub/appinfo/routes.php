@@ -11,6 +11,7 @@ return [
 		['name' => 'status#reindex', 'url' => '/admin/reindex', 'verb' => 'POST'],
 		['name' => 'status#reindexEmbeddings', 'url' => '/admin/reindex-embeddings', 'verb' => 'POST'],
 		['name' => 'status#reindexIaeasy', 'url' => '/admin/reindex-iaeasy', 'verb' => 'POST'],
+		['name' => 'status#reindexConfiaDoc', 'url' => '/admin/reindex-confia-doc', 'verb' => 'POST'],
 		['name' => 'status#getConfig', 'url' => '/admin/config', 'verb' => 'GET'],
 		['name' => 'status#saveConfig', 'url' => '/admin/config', 'verb' => 'POST'],
 		['name' => 'status#getLogs', 'url' => '/admin/logs', 'verb' => 'GET'],

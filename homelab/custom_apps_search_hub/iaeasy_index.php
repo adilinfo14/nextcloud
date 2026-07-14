@@ -320,7 +320,7 @@ foreach ($documents as $doc) {
 		'content' => $doc['content'],
 		'tags' => [$doc['subtype']],
 		'lastModified' => $now,
-		'iaeasy_link' => 'https://iaeasy.noschoixpourvous.com' . $doc['link'],
+		'external_link' => 'https://iaeasy.noschoixpourvous.com' . $doc['link'],
 	];
 
 	$putResult = esCurl('PUT', $elasticHost . '/' . $elasticIndex . '/_doc/' . rawurlencode($fullId), $parentDoc);
