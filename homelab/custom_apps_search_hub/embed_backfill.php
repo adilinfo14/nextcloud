@@ -47,7 +47,16 @@ $textMaxLenRetry = 300;
 $minContentLen = 20;
 $imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'heic', 'heif', 'webp', 'tiff', 'tif'];
 $demoPathPrefixes = ['Modèles/', 'Templates/', 'Notes/'];
-$demoExactTitles = ['Documents/Example.md'];
+$demoExactTitles = [
+	'Documents/Example.md',
+	// Cartes du tableau Deck de demo "Bienvenue dans Nextcloud Deck !" (board id=1,
+	// verifie en base) - meme categorie de bruit que Modeles/Notes ci-dessus.
+	'1. Ouvrez pour en apprendre davantage sur les tableaux et les cartes',
+	'2. Faites glisser les cartes vers la gauche et la droite, vers le haut et le bas',
+	'Créez votre première carte !',
+	'3. Appliquer un formatage riche et lier le contenu',
+	'4. Partagez, commentez et collaborez !',
+];
 
 function esCurl(string $method, string $url, ?array $body = null): array {
 	$ch = curl_init($url);
