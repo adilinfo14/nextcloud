@@ -146,6 +146,18 @@
 	margin-bottom: 8px;
 }
 
+.sh-filter-group-toggle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	cursor: pointer;
+	user-select: none;
+}
+
+.sh-filter-group-toggle:hover {
+	color: var(--color-main-text);
+}
+
 .sh-filter-option {
 	display: flex;
 	justify-content: space-between;

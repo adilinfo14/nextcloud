@@ -39,6 +39,7 @@
 	var HISTORY_MAX = 10;
 
 	var expandedCollectives = {};
+	var expandedGroups = {};
 
 	var PROVIDER_LABELS = { files: 'Fichiers', collectives: 'Wiki', deck: 'Deck' };
 	var TYPE_LABELS = {
@@ -203,13 +204,23 @@
 		if (!options || Object.keys(options).length === 0) {
 			return '';
 		}
-		var html = '<div class="sh-filter-group"><h4>' + esc(title) + '</h4>';
-		Object.keys(options).forEach(function (key) {
-			var active = state[stateKey] === key ? ' active' : '';
-			var label = (labels && labels[key]) || key;
-			html += '<div class="sh-filter-option' + active + '" data-key="' + stateKey + '" data-value="' + esc(key) + '">' +
-				'<span>' + esc(label) + '</span><span class="sh-count">' + options[key] + '</span></div>';
-		});
+		// Repliable comme l'arbo Collective/Chapitre, mais DEPLIE par defaut ici (ce
+		// sont des listes courtes et deja utiles a voir d'un coup, contrairement a
+		// l'arbo qui peut vite devenir long avec plusieurs collectives).
+		var isExpanded = expandedGroups[title] !== false;
+		var chevron = isExpanded ? '▾' : '▸';
+
+		var html = '<div class="sh-filter-group"><h4 class="sh-filter-group-toggle" data-group="' + esc(title) + '">' +
+			'<span class="sh-tree-toggle">' + chevron + '</span>' + esc(title) + '</h4>';
+
+		if (isExpanded) {
+			Object.keys(options).forEach(function (key) {
+				var active = state[stateKey] === key ? ' active' : '';
+				var label = (labels && labels[key]) || key;
+				html += '<div class="sh-filter-option' + active + '" data-key="' + stateKey + '" data-value="' + esc(key) + '">' +
+					'<span>' + esc(label) + '</span><span class="sh-count">' + options[key] + '</span></div>';
+			});
+		}
 		html += '</div>';
 		return html;
 	}
@@ -218,33 +229,40 @@
 		if (!collectives || Object.keys(collectives).length === 0) {
 			return '';
 		}
-		var html = '<div class="sh-filter-group"><h4>Collective</h4>';
-		Object.keys(collectives).forEach(function (key) {
-			var active = state.collective === key ? ' active' : '';
-			var chapters = (chaptersByCollective && chaptersByCollective[key]) || {};
-			var hasChapters = Object.keys(chapters).length > 0;
-			// Repliee par defaut, sauf si l'utilisateur l'a explicitement depliee ou si
-			// cette collective est le filtre actif (se deplie automatiquement en la
-			// selectionnant, se replie pas forcement en la deselectionnant).
-			var isExpanded = !!expandedCollectives[key] || state.collective === key;
 
-			var toggleHtml = hasChapters
-				? '<span class="sh-tree-toggle" data-collective="' + esc(key) + '">' + (isExpanded ? '▾' : '▸') + '</span>'
-				: '<span class="sh-tree-toggle-spacer"></span>';
+		var groupExpanded = expandedGroups['Collective'] !== false;
+		var groupChevron = groupExpanded ? '▾' : '▸';
+		var html = '<div class="sh-filter-group"><h4 class="sh-filter-group-toggle" data-group="Collective">' +
+			'<span class="sh-tree-toggle">' + groupChevron + '</span>Collective</h4>';
 
-			html += '<div class="sh-filter-option sh-filter-option-tree' + active + '" data-key="collective" data-value="' + esc(key) + '">' +
-				'<span class="sh-filter-option-left">' + toggleHtml +
-				'<span class="sh-filter-option-label">' + esc(key) + '</span></span>' +
-				'<span class="sh-count">' + collectives[key] + '</span></div>';
+		if (groupExpanded) {
+			Object.keys(collectives).forEach(function (key) {
+				var active = state.collective === key ? ' active' : '';
+				var chapters = (chaptersByCollective && chaptersByCollective[key]) || {};
+				var hasChapters = Object.keys(chapters).length > 0;
+				// Repliee par defaut, sauf si l'utilisateur l'a explicitement depliee ou si
+				// cette collective est le filtre actif (se deplie automatiquement en la
+				// selectionnant, se replie pas forcement en la deselectionnant).
+				var isExpanded = !!expandedCollectives[key] || state.collective === key;
 
-			if (hasChapters && isExpanded) {
-				Object.keys(chapters).forEach(function (chapterKey) {
-					var chapterActive = state.chapter === chapterKey ? ' active' : '';
-					html += '<div class="sh-filter-option sh-filter-suboption' + chapterActive + '" data-key="chapter" data-value="' + esc(chapterKey) + '">' +
-						'<span>' + esc(chapterKey) + '</span><span class="sh-count">' + chapters[chapterKey] + '</span></div>';
-				});
-			}
-		});
+				var toggleHtml = hasChapters
+					? '<span class="sh-tree-toggle" data-collective="' + esc(key) + '">' + (isExpanded ? '▾' : '▸') + '</span>'
+					: '<span class="sh-tree-toggle-spacer"></span>';
+
+				html += '<div class="sh-filter-option sh-filter-option-tree' + active + '" data-key="collective" data-value="' + esc(key) + '">' +
+					'<span class="sh-filter-option-left">' + toggleHtml +
+					'<span class="sh-filter-option-label">' + esc(key) + '</span></span>' +
+					'<span class="sh-count">' + collectives[key] + '</span></div>';
+
+				if (hasChapters && isExpanded) {
+					Object.keys(chapters).forEach(function (chapterKey) {
+						var chapterActive = state.chapter === chapterKey ? ' active' : '';
+						html += '<div class="sh-filter-option sh-filter-suboption' + chapterActive + '" data-key="chapter" data-value="' + esc(chapterKey) + '">' +
+							'<span>' + esc(chapterKey) + '</span><span class="sh-count">' + chapters[chapterKey] + '</span></div>';
+					});
+				}
+			});
+		}
 		html += '</div>';
 		return html;
 	}
@@ -265,7 +283,15 @@
 
 		filtersEl.innerHTML = html;
 
-		Array.prototype.forEach.call(filtersEl.querySelectorAll('.sh-tree-toggle'), function (el) {
+		Array.prototype.forEach.call(filtersEl.querySelectorAll('.sh-filter-group-toggle'), function (el) {
+			el.addEventListener('click', function () {
+				var group = el.getAttribute('data-group');
+				expandedGroups[group] = expandedGroups[group] === false;
+				renderFilters();
+			});
+		});
+
+		Array.prototype.forEach.call(filtersEl.querySelectorAll('.sh-tree-toggle[data-collective]'), function (el) {
 			el.addEventListener('click', function (ev) {
 				// stopPropagation : le chevron est imbrique dans le .sh-filter-option
 				// cliquable (filtre) - sans ca, un clic sur le chevron declencherait
