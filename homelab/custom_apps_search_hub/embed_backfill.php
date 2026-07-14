@@ -82,6 +82,19 @@ $minContentLen = 20;
 // tout le document (pas juste le debut) pour garder une couverture representative.
 $maxChunksPerDoc = 200;
 $imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'heic', 'heif', 'webp', 'tiff', 'tif'];
+// 5e piege trouve le 2026-07-14 (signale par l'utilisateur) : un tableur (ex.
+// odoo_contacts_1000.xlsx, 1000 lignes de contacts) matchait sans rapport sur des
+// requetes completement etrangeres. Cause differente des precedentes : ici le texte
+// EST bien reel et non-vide (pas de faux positif "contenu vide"), mais des donnees
+// TABULAIRES repetitives (colonnes nom/adresse/telephone/email) n'ont pas de "sens"
+// prosaïque a comparer - un modele d'embedding entraine sur du texte naturel produit
+// un vecteur peu fiable sur ce type de contenu structurel. Le decoupage recursif
+// (paragraphes/phrases) ne l'aide pas non plus : un tableur n'a ni ligne vide ni
+// ponctuation de fin de phrase, il retombe donc systematiquement sur le decoupage
+// brut. Exclusion des extensions tableur, meme logique que les images ci-dessus -
+// la recherche MOT-CLE reste evidemment inchangee (elle indexe toujours le contenu
+// complet, tableur inclus).
+$spreadsheetExtensions = ['xlsx', 'xls', 'ods', 'csv'];
 $demoPathPrefixes = ['Modèles/', 'Templates/', 'Notes/'];
 $demoExactTitles = [
 	'Documents/Example.md',
@@ -327,7 +340,7 @@ while (true) {
 		}
 
 		$ext = strtolower(pathinfo($title, PATHINFO_EXTENSION));
-		if (in_array($ext, $imageExtensions, true)) {
+		if (in_array($ext, $imageExtensions, true) || in_array($ext, $spreadsheetExtensions, true)) {
 			$skipped++;
 			continue;
 		}
