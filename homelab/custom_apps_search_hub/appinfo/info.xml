@@ -5,7 +5,7 @@
     <name>Recherche+</name>
     <summary>Page de recherche unifiee avec onglets par source et filtres par metadonnees</summary>
     <description>Interface de recherche maison (façon moteur de recherche d'entreprise) au dessus de l'index Elasticsearch existant : onglets Fichiers/Wiki/Deck, filtres par etiquette/collective/type/date, extraits de texte pertinents.</description>
-    <version>1.13.0</version>
+    <version>1.14.0</version>
     <licence>agpl</licence>
     <author>TKonsulting</author>
     <namespace>SearchHub</namespace>

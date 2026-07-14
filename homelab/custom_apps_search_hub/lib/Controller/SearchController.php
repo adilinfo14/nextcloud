@@ -243,10 +243,22 @@ class SearchController extends Controller {
 	 * assure par cette API est donc reproduit manuellement ici (buildAccessFilterShould())
 	 * en suivant exactement la meme logique que fulltextsearch::SearchService (owner,
 	 * users, groupes, cercles) - ne jamais simplifier ce filtre.
+	 *
+	 * Architecture "finder" + "ranker" (v2, 2026-07-14, cf. page wiki "23 Architecture
+	 * de Recherche+") :
+	 *  - FINDER : le kNN cible desormais des PASSAGES (~900 caracteres, generes par
+	 *    embed_backfill.php), pas des documents entiers - un document long dont le
+	 *    passage pertinent est au milieu est maintenant trouvable, alors qu'un seul
+	 *    vecteur sur les 800 premiers caracteres du document le ratait. Les hits sont
+	 *    regroupes par document parent (meilleur score de passage retenu).
+	 *  - RANKER : les ~15 meilleurs documents (post-finder) sont reclasses par un
+	 *    modele de langage local en UN SEUL appel (rerankWithLLM()) - plus precis que
+	 *    le score de similarite cosinus seul, qui ne "comprend" pas vraiment la
+	 *    requete, juste sa proximite vectorielle.
 	 */
 	#[NoAdminRequired]
 	#[NoCSRFRequired]
-	#[UserRateLimit(limit: 60, period: 60)]
+	#[UserRateLimit(limit: 30, period: 60)]
 	public function searchNeural(): JSONResponse {
 		$user = $this->userSession->getUser();
 		if ($user === null) {
@@ -273,14 +285,18 @@ class SearchController extends Controller {
 			return new JSONResponse(['error' => 'search_failed'], 500);
 		}
 
+		// k/num_candidates plus genereux que RAW_FETCH_SIZE : plusieurs passages peuvent
+		// venir du meme document, il en faut davantage en amont pour obtenir assez de
+		// documents PARENTS distincts une fois regroupes.
+		$passageK = self::RAW_FETCH_SIZE;
 		$query = [
-			'size' => self::RAW_FETCH_SIZE,
-			'_source' => ['title', 'tags', 'lastModified'],
+			'size' => $passageK,
+			'_source' => ['parent_id', 'chunk_text', 'chunk_index'],
 			'knn' => [
 				'field' => 'embedding_vector',
 				'query_vector' => $vector,
-				'k' => self::RAW_FETCH_SIZE,
-				'num_candidates' => self::RAW_FETCH_SIZE * 2,
+				'k' => $passageK,
+				'num_candidates' => $passageK * 3,
 				'filter' => [
 					'bool' => ['should' => $this->buildAccessFilterShould($user)],
 				],
@@ -303,35 +319,71 @@ class SearchController extends Controller {
 		}
 
 		$decoded = json_decode($body, true);
-		$hits = $decoded['hits']['hits'] ?? [];
+		$passageHits = $decoded['hits']['hits'] ?? [];
+
+		// Regroupement des passages par document PARENT : on ne garde que le meilleur
+		// passage (score le plus eleve) par parent, qui devient le score et l'extrait
+		// "naturel" (semantiquement le plus pertinent, pas une heuristique) de ce document.
+		$bestByParent = [];
+		foreach ($passageHits as $hit) {
+			$parentId = (string)($hit['_source']['parent_id'] ?? '');
+			if ($parentId === '') {
+				continue;
+			}
+			$score = (float)($hit['_score'] ?? 0);
+			if (!isset($bestByParent[$parentId]) || $score > $bestByParent[$parentId]['score']) {
+				$bestByParent[$parentId] = [
+					'score' => $score,
+					'chunkText' => (string)($hit['_source']['chunk_text'] ?? ''),
+				];
+			}
+		}
+
+		if (empty($bestByParent)) {
+			return new JSONResponse(['results' => [], 'facets' => $this->emptyFacets(), 'total' => 0, 'page' => 1, 'totalPages' => 1, 'neural' => true]);
+		}
+
+		$parentMeta = $this->fetchParentMetadata(array_keys($bestByParent));
 
 		$documents = [];
-		foreach ($hits as $hit) {
-			[$providerId, $documentId] = array_pad(explode(':', (string)$hit['_id'], 2), 2, '');
-			if ($providerId === 'files' && str_starts_with((string)($hit['_source']['title'] ?? ''), '.Collectifs/')) {
+		foreach ($bestByParent as $parentId => $best) {
+			[$providerId, $documentId] = array_pad(explode(':', $parentId, 2), 2, '');
+			$meta = $parentMeta[$parentId] ?? null;
+			if ($meta === null) {
+				// Document supprime/desindexe depuis le calcul du passage (rare, cf.
+				// prochain backfill) - on ne peut pas l'afficher sans son titre/lien.
 				continue;
 			}
 
-			$title = (string)($hit['_source']['title'] ?? '');
-			$tags = $hit['_source']['tags'] ?? [];
+			$title = $meta['title'];
+			if ($providerId === 'files' && str_starts_with($title, '.Collectifs/')) {
+				continue;
+			}
+
+			$tags = $meta['tags'];
 			$link = $this->resolveNeuralLink($providerId, $documentId);
+			$matchedTerms = $this->computeMatchedTerms($term, $title, [$best['chunkText']], $tags);
 
 			$documents[] = [
 				'id' => $documentId,
 				'providerId' => $providerId,
 				'title' => $title,
 				'link' => $link,
-				'modifiedTime' => (int)($hit['_source']['lastModified'] ?? 0),
-				'tags' => is_array($tags) ? $tags : [],
-				'excerpts' => [],
-				'esScore' => (float)($hit['_score'] ?? 0),
-				'matchedTerms' => $this->computeMatchedTerms($term, $title, [], is_array($tags) ? $tags : []),
+				'modifiedTime' => $meta['lastModified'],
+				'tags' => $tags,
+				'excerpts' => [$best['chunkText']],
+				'esScore' => $best['score'],
+				'matchedTerms' => $matchedTerms,
 				'titleMatch' => !empty($this->computeMatchedTerms($term, $title, [], [])),
 				'collective' => $this->extractCollectiveFromLink($providerId, $link),
 				'fileType' => $this->extractFileType($providerId, $title),
 				'chapter' => null,
 			];
 		}
+
+		// L'ordre kNN (par score de passage) reste la base ; le RANKER (LLM) va ensuite
+		// affiner ce classement sur le sous-ensemble le plus prometteur.
+		usort($documents, static fn ($a, $b) => $b['esScore'] <=> $a['esScore']);
 
 		$chapterMap = $this->fetchChapterMap($documents);
 		foreach ($documents as &$doc) {
@@ -346,15 +398,19 @@ class SearchController extends Controller {
 			? $documents
 			: array_values(array_filter($documents, static fn ($doc) => $doc['providerId'] === $provider));
 
+		$sort = (string)$this->request->getParam('sort', 'relevance');
+		if ($sort === 'relevance' && count($tabDocuments) > 1) {
+			$tabDocuments = $this->rerankWithLLM($term, $tabDocuments);
+		}
+
 		$facets = $this->computeFacets($tabDocuments);
 		$facets['providers'] = $this->computeProviderCounts($documents);
 
 		$filtered = $this->applyFilters($tabDocuments);
-		// Le classement par similarite vectorielle EST le tri par defaut ici ; les autres
-		// options (date/titre) restent proposees mais "pertinence"/"pondere" n'ont pas de
-		// sens sans score BM25 ni couverture lexicale fiable - geres normalement par
-		// applySort() qui retombe sur l'ordre kNN d'origine par defaut.
-		$filtered = $this->applySort($filtered, (string)$this->request->getParam('sort', 'relevance'));
+		// applySort() : 'relevance' preserve l'ordre du tableau tel quel, donc l'ordre
+		// issu du RANKER ci-dessus si applicable. Les autres tris (date/titre) restent
+		// disponibles mais n'ont pas de sens "pondere" ici (pas de score BM25).
+		$filtered = $this->applySort($filtered, $sort);
 
 		$total = count($filtered);
 		$totalPages = max(1, (int)ceil($total / self::PAGE_SIZE));
@@ -362,19 +418,11 @@ class SearchController extends Controller {
 		$requestedPage = min($requestedPage, $totalPages);
 		$pageResults = array_slice($filtered, ($requestedPage - 1) * self::PAGE_SIZE, self::PAGE_SIZE);
 
-		// La recherche par sens n'a pas de "mot exact" a mettre en avant (c'est le principe :
-		// elle matche sur le SENS, pas le mot). Au minimum, on affiche un extrait du contenu
-		// reel deja recupere pour la previsualisation, centre sur un eventuel chevauchement
-		// lexical (matchedTerms) quand il y en a un, sinon le debut du document.
+		// Contenu complet uniquement pour la previsualisation plein texte (bouton
+		// "Previsualisation") - l'extrait de liste, lui, vient deja du meilleur passage
+		// semantique ci-dessus, plus precis qu'une heuristique sur le contenu complet.
 		foreach ($pageResults as &$doc) {
-			$fullContent = $this->fetchFullContent($doc['providerId'], $doc['id']);
-			if ($fullContent !== '' && empty($doc['matchedTerms'])) {
-				$doc['matchedTerms'] = $this->computeMatchedTerms($term, $doc['title'], [], $doc['tags'], $fullContent);
-			}
-			$doc['fullContent'] = $fullContent;
-			if ($fullContent !== '') {
-				$doc['excerpts'] = [$this->buildContentSnippet($fullContent, $doc['matchedTerms'])];
-			}
+			$doc['fullContent'] = $this->fetchFullContent($doc['providerId'], $doc['id']);
 		}
 		unset($doc);
 
@@ -391,31 +439,162 @@ class SearchController extends Controller {
 	}
 
 	/**
-	 * Extrait de contenu pour un resultat de recherche neuronale : centre sur le premier
-	 * terme de matchedTerms trouve dans le texte (chevauchement lexical incident, meme
-	 * quand le vrai "match" est semantique), sinon les premiers caracteres du document.
+	 * Metadonnees (titre/tags/date) des documents PARENTS d'un lot de passages, via un
+	 * _mget groupe (une seule requete HTTP pour tous les parents du lot) - meme
+	 * principe que fetchChapterMap(). Necessaire car le finder (kNN) ne renvoie que des
+	 * passages, qui n'ont pas eux-memes de titre/tags/date (portes par le document
+	 * original, jamais duplique sur chaque passage pour eviter la redondance).
+	 *
+	 * @return array<string, array{title: string, tags: array, lastModified: int}>
 	 */
-	private function buildContentSnippet(string $fullContent, array $matchedTerms): string {
-		$maxLen = 220;
-		$lower = mb_strtolower($fullContent);
+	private function fetchParentMetadata(array $parentIds): array {
+		$elasticHost = $this->appConfig->getValueString('fulltextsearch_elasticsearch', 'elastic_host', '', true);
+		$elasticIndex = $this->appConfig->getValueString('fulltextsearch_elasticsearch', 'elastic_index', '', true);
+		if ($elasticHost === '' || $elasticIndex === '' || empty($parentIds)) {
+			return [];
+		}
 
-		$bestPos = null;
-		foreach ($matchedTerms as $term) {
-			$pos = mb_strpos($lower, mb_strtolower($term));
-			if ($pos !== false && ($bestPos === null || $pos < $bestPos)) {
-				$bestPos = $pos;
+		$docs = array_map(static fn ($id) => ['_id' => $id, '_source' => ['title', 'tags', 'lastModified']], $parentIds);
+
+		$ch = curl_init(rtrim($elasticHost, '/') . '/' . $elasticIndex . '/_mget');
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+		curl_setopt($ch, CURLOPT_POST, true);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['docs' => $docs]));
+		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+		$body = curl_exec($ch);
+		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		curl_close($ch);
+
+		if ($body === false || $httpCode >= 400) {
+			return [];
+		}
+
+		$decoded = json_decode($body, true);
+		$map = [];
+		foreach (($decoded['docs'] ?? []) as $hit) {
+			if (empty($hit['found']) || !isset($hit['_id'])) {
+				continue;
+			}
+			$source = $hit['_source'] ?? [];
+			$tags = $source['tags'] ?? [];
+			$map[$hit['_id']] = [
+				'title' => (string)($source['title'] ?? ''),
+				'tags' => is_array($tags) ? $tags : [],
+				'lastModified' => (int)($source['lastModified'] ?? 0),
+			];
+		}
+
+		return $map;
+	}
+
+	/**
+	 * RANKER : reclasse les N meilleurs candidats du finder (kNN) via un modele de
+	 * langage local, en UN SEUL appel (pas un par document - beaucoup trop lent). Le
+	 * score de similarite cosinus mesure une proximite vectorielle, pas une comprehension
+	 * reelle de la requete ; un LLM qui lit le titre + le meilleur extrait de chaque
+	 * candidat peut corriger les cas ou le finder classe mal (ex: un candidat vectoriellement
+	 * proche mais hors-sujet, ou un candidat pertinent legerement moins proche qu'un
+	 * candidat generique).
+	 */
+	private const RERANK_TOP_N = 15;
+
+	private function rerankWithLLM(string $term, array $documents): array {
+		$topN = array_slice($documents, 0, self::RERANK_TOP_N);
+		$rest = array_slice($documents, self::RERANK_TOP_N);
+
+		$listText = '';
+		foreach ($topN as $i => $doc) {
+			$snippet = mb_substr($doc['excerpts'][0] ?? '', 0, 220);
+			$listText .= ($i + 1) . ". Titre : " . $doc['title'] . "\n   Extrait : " . $snippet . "\n\n";
+		}
+
+		$prompt = "Requete de recherche : \"" . $term . "\"\n\n"
+			. "Voici " . count($topN) . " documents candidats (titre + extrait) :\n\n"
+			. $listText
+			. "Classe ces documents du PLUS pertinent au MOINS pertinent pour cette requete precise. "
+			. "Reponds UNIQUEMENT avec leurs numeros separes par des virgules, du plus au moins pertinent, "
+			. "sans aucun texte ni explication. Exemple de reponse attendue : 3,1,5,2,4";
+
+		$response = $this->generateRaw($prompt);
+		if ($response === null) {
+			return $documents;
+		}
+
+		$order = $this->parseRankingResponse($response, count($topN));
+		if ($order === null) {
+			return $documents;
+		}
+
+		$reranked = [];
+		$used = [];
+		foreach ($order as $idx) {
+			if (isset($topN[$idx]) && !isset($used[$idx])) {
+				$reranked[] = $topN[$idx];
+				$used[$idx] = true;
+			}
+		}
+		// Filet de securite : un indice manquant/invalide dans la reponse du LLM ne doit
+		// pas faire disparaitre un candidat - on rajoute ceux non repris, dans leur ordre
+		// kNN d'origine.
+		foreach ($topN as $idx => $doc) {
+			if (!isset($used[$idx])) {
+				$reranked[] = $doc;
 			}
 		}
 
-		if ($bestPos !== null) {
-			$start = max(0, $bestPos - 80);
-			$snippet = trim(mb_substr($fullContent, $start, $maxLen));
-			return ($start > 0 ? '… ' : '') . $snippet . '…';
+		return array_merge($reranked, $rest);
+	}
+
+	/**
+	 * Parse "3,1,5,2,4" -> [2,0,4,1,3] (indices 0-based). Retourne null si la reponse du
+	 * LLM n'est pas exploitable (format inattendu) - rerankWithLLM() retombe alors sur
+	 * l'ordre kNN d'origine plutot que de planter ou d'afficher un ordre incoherent.
+	 */
+	private function parseRankingResponse(string $response, int $expectedCount): ?array {
+		if (!preg_match_all('/\d+/', $response, $matches)) {
+			return null;
+		}
+		$numbers = array_map('intval', $matches[0]);
+		$indices = array_values(array_unique(array_map(static fn ($n) => $n - 1, $numbers)));
+		$indices = array_values(array_filter($indices, static fn ($i) => $i >= 0 && $i < $expectedCount));
+
+		// Trop peu d'indices exploitables (le LLM a mal repondu) : pas fiable, on abandonne.
+		if (count($indices) < max(1, (int)($expectedCount * 0.5))) {
+			return null;
 		}
 
-		$snippet = trim(mb_substr($fullContent, 0, $maxLen));
-		return $snippet . (mb_strlen($fullContent) > $maxLen ? '…' : '');
+		return $indices;
 	}
+
+	private function generateRaw(string $prompt): ?string {
+		$ollamaHost = $this->appConfig->getValueString('search_hub', 'ollama_host', 'http://ollama:11434');
+		$model = $this->appConfig->getValueString('search_hub', 'explain_model', 'llama3:8b');
+
+		$ch = curl_init(rtrim($ollamaHost, '/') . '/api/generate');
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_TIMEOUT, 45);
+		curl_setopt($ch, CURLOPT_POST, true);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
+			'model' => $model,
+			'prompt' => $prompt,
+			'stream' => false,
+		]));
+		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+		$body = curl_exec($ch);
+		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		curl_close($ch);
+
+		if ($body === false || $httpCode >= 400) {
+			$this->logger->error('search_hub: echec appel generation LLM', ['httpCode' => $httpCode]);
+			return null;
+		}
+
+		$decoded = json_decode($body, true);
+		$response = trim((string)($decoded['response'] ?? ''));
+		return $response !== '' ? $response : null;
+	}
+
 
 	/**
 	 * Reproduit fidelement OCA\FullTextSearch\Service\SearchService::getDocumentAccessFromUser()
@@ -548,9 +727,6 @@ class SearchController extends Controller {
 	}
 
 	private function generateExplanation(string $term, string $title, string $snippet): ?string {
-		$ollamaHost = $this->appConfig->getValueString('search_hub', 'ollama_host', 'http://ollama:11434');
-		$model = $this->appConfig->getValueString('search_hub', 'explain_model', 'llama3:8b');
-
 		$prompt = "Une recherche par sens (semantique) a trouve ce document pertinent pour la question posee, "
 			. "meme s'il ne contient pas forcement les memes mots. En UNE SEULE phrase courte et concrete "
 			. "(pas plus de 30 mots), en francais, explique le lien entre la question et ce document. "
@@ -559,28 +735,7 @@ class SearchController extends Controller {
 			. "Titre du document : " . $title . "\n"
 			. "Extrait du document : " . $snippet;
 
-		$ch = curl_init(rtrim($ollamaHost, '/') . '/api/generate');
-		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-		curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-		curl_setopt($ch, CURLOPT_POST, true);
-		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
-			'model' => $model,
-			'prompt' => $prompt,
-			'stream' => false,
-		]));
-		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-		$body = curl_exec($ch);
-		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-		curl_close($ch);
-
-		if ($body === false || $httpCode >= 400) {
-			$this->logger->error('search_hub: echec generation explication de match', ['httpCode' => $httpCode]);
-			return null;
-		}
-
-		$decoded = json_decode($body, true);
-		$response = trim((string)($decoded['response'] ?? ''));
-		return $response !== '' ? $response : null;
+		return $this->generateRaw($prompt);
 	}
 
 	private function computeMatchedTerms(string $term, string $title, array $excerpts, array $tags, string $fullContent = ''): array {

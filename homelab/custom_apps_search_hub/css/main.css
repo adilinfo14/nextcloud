@@ -317,6 +317,14 @@
 	border-left: 2px solid var(--color-border);
 }
 
+.sh-excerpt-label {
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	color: var(--color-text-maxcontrast);
+	margin-bottom: 3px;
+}
+
 .sh-result-excerpt mark {
 	background: rgba(201, 168, 76, 0.35);
 	color: inherit;

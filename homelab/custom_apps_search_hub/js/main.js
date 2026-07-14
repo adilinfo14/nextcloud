@@ -136,7 +136,9 @@
 		}
 
 		document.getElementById('sh-results').innerHTML = '<div id="sh-loading">' +
-			(state.neural ? 'Recherche par sens en cours...' : 'Recherche en cours...') + '</div>';
+			(state.neural
+				? 'Recherche par sens en cours (analyse semantique + reclassement)... cela peut prendre 20 a 30 secondes.'
+				: 'Recherche en cours...') + '</div>';
 
 		var params = new URLSearchParams({
 			term: state.term,
@@ -346,9 +348,13 @@
 			// highlight() sur state.term entier : en recherche par sens, state.term peut etre
 			// une phrase complete qui ne matchera jamais litteralement dans l'extrait.
 			var highlightWords = (r.matchedTerms && r.matchedTerms.length) ? r.matchedTerms : [state.term];
-			var excerptsHtml = excerpts.map(function (ex) {
+			// En recherche par sens, l'extrait n'est pas un morceau arbitraire du debut du
+			// document : c'est le PASSAGE (paragraphe) le plus proche semantiquement de la
+			// requete, trouve par le finder (kNN sur passages) - vaut la peine de l'indiquer.
+			var excerptLabel = state.neural ? '<div class="sh-excerpt-label">Passage le plus pertinent :</div>' : '';
+			var excerptsHtml = excerpts.length ? excerptLabel + excerpts.map(function (ex) {
 				return '<div class="sh-result-excerpt">' + highlightTerms(ex, highlightWords) + '</div>';
-			}).join('');
+			}).join('') : '';
 
 			var titleParts = r.title.split('/');
 			var shortTitle = titleParts[titleParts.length - 1].replace(/\.[a-zA-Z0-9]+$/, '');

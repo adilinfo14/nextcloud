@@ -1,50 +1,67 @@
 <?php
-// Backfill des embeddings (nomic-embed-text, 768 dim) pour les documents Elasticsearch
-// qui n'en ont pas encore (recherche_hub / Recherche+ - mode "Recherche par sens").
-// Script autonome (pas de bootstrap Nextcloud necessaire) : incremental par construction
-// (ne cible que embedding_vector manquant), donc a re-executer periodiquement (cron) pour
-// rattraper les nouveaux documents indexes depuis.
+// Backfill des embeddings (nomic-embed-text, 768 dim) pour Recherche+ - mode
+// "Recherche par sens". Script autonome (pas de bootstrap Nextcloud necessaire).
+//
+// v2 (2026-07-14) : passage au DECOUPAGE EN PASSAGES (chunking) plutot qu'un seul
+// vecteur par document entier. Raison : un vecteur unique calcule sur les 800
+// premiers caracteres d'un document long ne represente que son debut - si le
+// passage pertinent est au milieu ou a la fin, la recherche par sens le rate. Chaque
+// document REEL et ELIGIBLE est maintenant decoupe en passages de ~900 caracteres
+// (chevauchement 150 car.) ; CHAQUE passage devient un document Elasticsearch
+// LEGER a part entiere (id "<providerId>:<documentId>:p<N>"), avec son propre
+// vecteur et une COPIE des champs d'acces du document parent (owner/users/groups/
+// circles) pour que le filtre d'acces de searchNeural() fonctionne identiquement
+// passage par passage. Le document original garde son "content" complet (utilise
+// par la recherche mot-cle et la previsualisation) mais N'A PLUS de champ
+// embedding_vector - la recherche par sens ne cible plus que les passages, dedupliques
+// par document parent a la lecture (voir SearchController::searchNeural()).
+//
+// Incremental par construction : ne traite que les documents pas encore marques
+// "chunked" (voir la requete scroll plus bas) - a re-executer periodiquement (cron)
+// pour rattraper les nouveaux documents indexes depuis.
 //
 // Piege important (trouve en prod le 2026-07-13) : nomic-embed-text plante avec un
 // panic Ollama ("caching disabled but unable to fit entire input in a batch") si le
-// texte envoye depasse la taille de batch du modele (~512 tokens). Un texte de 3000
-// caracteres declenchait ce crash sur ~170/1808 documents (ceux au contenu le plus
-// dense). D'ou TEXT_MAX_LEN volontairement conservateur (800 car.) + un retry
-// automatique avec un texte encore plus court en cas d'echec, plutot que de perdre le
-// document silencieusement.
+// texte envoye depasse la taille de batch du modele (~512 tokens). D'ou CHUNK_SIZE
+// volontairement conservateur (900 car.) + un retry automatique avec un texte plus
+// court en cas d'echec, plutot que de perdre le passage silencieusement.
 //
 // 2e piege trouve le 2026-07-14 : un dossier (ou fichier quasi vide) n'a PAS de
-// "content" mais A un titre ("Notes", "Photos", "Mon Iphone"...) - embarquer seulement
-// ce titre produit un vecteur tres court/generique qui se retrouve, par similarite
-// cosinus, artificiellement "proche" de PRESQUE TOUTES les requetes (remonte en tete
-// de resultats sans aucun rapport). D'ou l'exigence d'un contenu REEL minimal
-// (MIN_CONTENT_LEN), independamment du titre.
+// "content" mais A un titre ("Notes", "Photos", "Mon Iphone"...) - embarquer
+// seulement ce titre produit un vecteur tres court/generique qui se retrouve, par
+// similarite cosinus, artificiellement "proche" de PRESQUE TOUTES les requetes.
+// D'ou l'exigence d'un contenu REEL minimal (MIN_CONTENT_LEN), independamment du
+// titre.
 //
 // 3e piege trouve le 2026-07-14 (meme session) : files_fulltextsearch_tesseract fait
 // tourner l'OCR sur TOUTES les images (pas seulement les scans de documents) - une
 // vraie photo de vacances produit un "content" de bruit OCR (ex: "ES PE hn\n\nere =")
-// qui passe le filtre MIN_CONTENT_LEN mais n'a evidemment aucun sens. D'ou l'exclusion
-// explicite des extensions image (les photos n'ont rien a faire dans une recherche
-// SEMANTIQUE par definition - aucun contenu textuel reel a comparer).
+// qui passe le filtre MIN_CONTENT_LEN mais n'a evidemment aucun sens. D'ou
+// l'exclusion explicite des extensions image.
 //
-// 4e piege trouve le 2026-07-14 (meme session, signale par l'utilisateur) : un
-// document avec du VRAI contenu coherent (ex: "Modeles/Menu.odt", un menu de
-// restaurant complet) peut quand meme ressortir sans rapport avec une requete
-// technique - pas un bug d'embedding, mais du bruit STRUCTUREL : "Modeles/" est le
-// pack de modeles Office LIVRE PAR DEFAUT avec toute installation Nextcloud (Menu,
-// Facture, CV, Certificat...), jamais du vrai contenu utilisateur. Deja identifie
-// comme tel dans ce projet (cf. exclusion similaire faite pour la bibliotheque de
-// documents Tables) - meme logique appliquee ici : exclure les dossiers de demo
-// connus du skeleton Nextcloud plutot que de les embarquer.
+// 4e piege trouve le 2026-07-14 (signale par l'utilisateur) : un document au contenu
+// tout a fait coherent (ex: "Modeles/Menu.odt", un menu de restaurant complet) peut
+// quand meme ressortir sans rapport - pas un bug d'embedding mais du bruit
+// STRUCTUREL : "Modeles/" est le pack de gabarits Office livre par defaut avec toute
+// installation Nextcloud, jamais du vrai contenu utilisateur. D'ou l'exclusion des
+// dossiers/cartes de demo connus du skeleton Nextcloud (deja identifies comme tels
+// ailleurs dans ce projet).
 
 $elasticHost = 'http://elasticsearch:9200';
 $elasticIndex = 'nextcloud_tkonsulting';
 $ollamaHost = 'http://ollama:11434';
 $model = 'nomic-embed-text';
-$batchSize = 30;
-$textMaxLen = 800;
-$textMaxLenRetry = 300;
+$batchSize = 20;
+$chunkSize = 900;
+$chunkOverlap = 150;
+$chunkSizeRetry = 350;
 $minContentLen = 20;
+// Plafond decouvert en prod le 2026-07-14 : un vrai livre PDF de 2.8 Mo ("Intelligence
+// artificielle" de John Paul Mueller) a produit 1182 passages a lui seul, ralentissant
+// le backfill de facon disproportionnee pour un seul document. Au-dela de ce plafond,
+// on repartit les chunks UNIFORMEMENT sur tout le document (pas juste le debut) pour
+// garder une couverture representative plutot que de tronquer bêtement au debut.
+$maxChunksPerDoc = 40;
 $imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'heic', 'heif', 'webp', 'tiff', 'tif'];
 $demoPathPrefixes = ['Modèles/', 'Templates/', 'Notes/'];
 $demoExactTitles = [
@@ -94,11 +111,45 @@ function embed(string $ollamaHost, string $model, string $text): ?array {
 	return is_array($vector) ? $vector : null;
 }
 
+/** @return string[] */
+function splitIntoChunks(string $text, int $chunkSize, int $overlap): array {
+	$text = trim($text);
+	$len = mb_strlen($text);
+	if ($len === 0) {
+		return [];
+	}
+	if ($len <= $chunkSize) {
+		return [$text];
+	}
+
+	$chunks = [];
+	$start = 0;
+	$step = max(1, $chunkSize - $overlap);
+	while ($start < $len) {
+		$chunk = trim(mb_substr($text, $start, $chunkSize));
+		if (mb_strlen($chunk) >= 20) {
+			$chunks[] = $chunk;
+		}
+		if ($start + $chunkSize >= $len) {
+			break;
+		}
+		$start += $step;
+	}
+	return $chunks;
+}
+
 $scrollUrl = $elasticHost . '/' . $elasticIndex . '/_search?scroll=5m';
 $result = esCurl('POST', $scrollUrl, [
 	'size' => $batchSize,
-	'_source' => ['title', 'content', 'parts'],
-	'query' => ['bool' => ['must_not' => ['exists' => ['field' => 'embedding_vector']]]],
+	'_source' => ['title', 'content', 'parts', 'owner', 'users', 'groups', 'circles'],
+	'query' => [
+		'bool' => [
+			'must_not' => [
+				['exists' => ['field' => 'chunked']],
+				['exists' => ['field' => 'parent_id']], // ne jamais re-traiter un passage lui-meme
+			],
+		],
+	],
 ]);
 
 if (isset($result['error']) && !isset($result['_scroll_id'])) {
@@ -109,7 +160,8 @@ if (isset($result['error']) && !isset($result['_scroll_id'])) {
 $scrollId = $result['_scroll_id'] ?? null;
 $total = $result['hits']['total']['value'] ?? 0;
 $processed = 0;
-$embedded = 0;
+$documentsChunked = 0;
+$passagesCreated = 0;
 $skipped = 0;
 $errors = 0;
 
@@ -152,39 +204,94 @@ while (true) {
 
 		$realContent = trim($content . ' ' . $partsText);
 		if (mb_strlen($realContent) < $minContentLen) {
-			// Pas de contenu reel (dossier, fichier vide/quasi-vide) : on ne calcule PAS
-			// d'embedding pour ce document plutot que d'embarquer juste son titre (voir le
-			// 2e piege documente plus haut) - il n'apparaitra jamais en recherche par sens,
-			// ce qui est correct puisqu'il n'a aucun "sens" a comparer.
+			// Pas de contenu reel (dossier, fichier vide/quasi-vide) : aucun passage cree,
+			// ce document n'apparaitra jamais en recherche par sens - correct, il n'a
+			// aucun "sens" a comparer.
 			$skipped++;
 			continue;
 		}
-		$fullText = trim($title . "\n" . $content . ' ' . $partsText);
 
-		$vector = embed($ollamaHost, $model, 'search_document: ' . mb_substr($fullText, 0, $textMaxLen));
-		if ($vector === null) {
-			// Probable crash "batch trop grand" sur un document tres dense : retente une
-			// seule fois avec un texte plus court avant d'abandonner ce document.
-			$vector = embed($ollamaHost, $model, 'search_document: ' . mb_substr($fullText, 0, $textMaxLenRetry));
-		}
-		if ($vector === null) {
-			$errors++;
-			echo "ERREUR embed $id\n";
+		$textChunks = splitIntoChunks($realContent, $chunkSize, $chunkOverlap);
+		if (empty($textChunks)) {
+			$skipped++;
 			continue;
 		}
+		if (count($textChunks) > $maxChunksPerDoc) {
+			// Echantillonnage UNIFORME sur tout le document (pas juste les $maxChunksPerDoc
+			// premiers) : garde une couverture representative du debut a la fin plutot que
+			// de ne jamais voir la deuxieme moitie d'un document tres long.
+			$total = count($textChunks);
+			$sampled = [];
+			for ($k = 0; $k < $maxChunksPerDoc; $k++) {
+				$sampled[] = $textChunks[(int)floor($k * ($total - 1) / max(1, $maxChunksPerDoc - 1))];
+			}
+			$textChunks = array_values(array_unique($sampled));
+		}
 
-		$updateResult = esCurl('POST', $elasticHost . '/' . $elasticIndex . '/_update/' . rawurlencode($id), [
-			'doc' => ['embedding_vector' => $vector],
-		]);
-		if (isset($updateResult['error'])) {
+		$access = [
+			'owner' => $source['owner'] ?? null,
+			'users' => $source['users'] ?? [],
+			'groups' => $source['groups'] ?? [],
+			'circles' => $source['circles'] ?? [],
+		];
+
+		$chunkFailure = false;
+		$createdForThisDoc = 0;
+		foreach ($textChunks as $i => $chunkText) {
+			// Le titre est prefixe a chaque passage : donne du contexte au modele
+			// d'embedding (sans lui, un passage isole du milieu d'un document perd le
+			// sujet general) et permet aussi de matcher directement sur le titre seul.
+			$embedInput = 'search_document: ' . $title . "\n" . $chunkText;
+
+			$vector = embed($ollamaHost, $model, mb_substr($embedInput, 0, $chunkSize + 200));
+			if ($vector === null) {
+				$vector = embed($ollamaHost, $model, mb_substr('search_document: ' . $title . "\n" . mb_substr($chunkText, 0, $chunkSizeRetry), 0, $chunkSizeRetry + 200));
+			}
+			if ($vector === null) {
+				$chunkFailure = true;
+				echo "ERREUR embed passage $id:p$i\n";
+				continue;
+			}
+
+			$chunkDoc = array_merge($access, [
+				'parent_id' => $id,
+				'chunk_index' => $i,
+				'chunk_text' => $chunkText,
+				'embedding_vector' => $vector,
+			]);
+			$putResult = esCurl('PUT', $elasticHost . '/' . $elasticIndex . '/_doc/' . rawurlencode($id . ':p' . $i), $chunkDoc);
+			if (isset($putResult['error'])) {
+				$chunkFailure = true;
+				echo "ERREUR index passage $id:p$i : " . json_encode($putResult) . "\n";
+				continue;
+			}
+			$createdForThisDoc++;
+			$passagesCreated++;
+		}
+
+		if ($createdForThisDoc > 0) {
+			// Marque le document parent comme traite (evite de le retraiter au prochain
+			// passage du cron) et retire un eventuel embedding_vector residuel de
+			// l'ancienne approche "un seul vecteur par document" (v1).
+			$markResult = esCurl('POST', $elasticHost . '/' . $elasticIndex . '/_update/' . rawurlencode($id), [
+				'script' => [
+					'lang' => 'painless',
+					'source' => "ctx._source.chunked = true; if (ctx._source.containsKey('embedding_vector')) { ctx._source.remove('embedding_vector'); }",
+				],
+			]);
+			if (isset($markResult['error'])) {
+				$errors++;
+				echo "ERREUR marquage chunked $id : " . json_encode($markResult) . "\n";
+			} else {
+				$documentsChunked++;
+			}
+		}
+		if ($chunkFailure) {
 			$errors++;
-			echo "ERREUR update $id : " . json_encode($updateResult) . "\n";
-		} else {
-			$embedded++;
 		}
 	}
 
-	echo "Progression : $processed / $total (embedded=$embedded, skipped=$skipped, errors=$errors)\n";
+	echo "Progression : $processed / $total (documents=$documentsChunked, passages=$passagesCreated, skipped=$skipped, errors=$errors)\n";
 
 	$result = esCurl('POST', $elasticHost . '/_search/scroll', [
 		'scroll' => '5m',
@@ -193,4 +300,4 @@ while (true) {
 	$scrollId = $result['_scroll_id'] ?? $scrollId;
 }
 
-echo "Termine. processed=$processed embedded=$embedded skipped=$skipped errors=$errors\n";
+echo "Termine. processed=$processed documents=$documentsChunked passages=$passagesCreated skipped=$skipped errors=$errors\n";
