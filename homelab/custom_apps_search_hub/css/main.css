@@ -378,6 +378,42 @@
 	font-style: italic;
 }
 
+.sh-result-explain {
+	margin-top: 4px;
+}
+
+.sh-explain-btn {
+	font-size: 11px;
+	color: var(--color-primary-element);
+	cursor: pointer;
+	text-decoration: underline;
+}
+
+.sh-explain-btn:hover {
+	opacity: 0.8;
+}
+
+.sh-explain-btn.sh-explain-loading {
+	cursor: default;
+	text-decoration: none;
+	opacity: 0.6;
+}
+
+.sh-explain-text {
+	display: none;
+	font-size: 12px;
+	font-style: italic;
+	color: var(--color-text-light, var(--color-main-text));
+	background: var(--color-background-hover);
+	border-radius: var(--border-radius);
+	padding: 6px 10px;
+	margin-top: 4px;
+}
+
+.sh-explain-text.open {
+	display: block;
+}
+
 .sh-result-path {
 	overflow: hidden;
 	text-overflow: ellipsis;

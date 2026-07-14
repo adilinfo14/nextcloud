@@ -511,6 +511,78 @@ class SearchController extends Controller {
 		return is_array($vector) ? $vector : null;
 	}
 
+	/**
+	 * "Pourquoi ce resultat ?" - explication en langage naturel d'un match de la
+	 * recherche par sens (kNN), la ou le surlignage lexical (matchedTerms) ne suffit
+	 * pas puisque le principe meme de la recherche semantique est de matcher sans mot
+	 * commun. Calcule A LA DEMANDE (un clic par resultat), jamais pour tout un lot de
+	 * resultats d'un coup - un appel LLM prend plusieurs secondes sur ce serveur sans
+	 * GPU, generer ca pour 60 resultats a chaque recherche serait inutilisable.
+	 */
+	#[NoAdminRequired]
+	#[NoCSRFRequired]
+	#[UserRateLimit(limit: 20, period: 60)]
+	public function explainMatch(): JSONResponse {
+		$user = $this->userSession->getUser();
+		if ($user === null) {
+			return new JSONResponse(['error' => 'forbidden'], 403);
+		}
+
+		$term = trim((string)$this->request->getParam('term', ''));
+		$title = trim((string)$this->request->getParam('title', ''));
+		$snippet = trim((string)$this->request->getParam('snippet', ''));
+		if ($term === '' || $title === '') {
+			return new JSONResponse(['error' => 'invalid_params'], 400);
+		}
+		if (mb_strlen($term) > self::MAX_TERM_LENGTH) {
+			$term = mb_substr($term, 0, self::MAX_TERM_LENGTH);
+		}
+		$snippet = mb_substr($snippet, 0, 800);
+
+		$explanation = $this->generateExplanation($term, $title, $snippet);
+		if ($explanation === null) {
+			return new JSONResponse(['error' => 'generation_failed'], 500);
+		}
+
+		return new JSONResponse(['explanation' => $explanation]);
+	}
+
+	private function generateExplanation(string $term, string $title, string $snippet): ?string {
+		$ollamaHost = $this->appConfig->getValueString('search_hub', 'ollama_host', 'http://ollama:11434');
+		$model = $this->appConfig->getValueString('search_hub', 'explain_model', 'llama3:8b');
+
+		$prompt = "Une recherche par sens (semantique) a trouve ce document pertinent pour la question posee, "
+			. "meme s'il ne contient pas forcement les memes mots. En UNE SEULE phrase courte et concrete "
+			. "(pas plus de 30 mots), en francais, explique le lien entre la question et ce document. "
+			. "Ne repete pas la question mot pour mot, va droit au but.\n\n"
+			. "Question de recherche : " . $term . "\n"
+			. "Titre du document : " . $title . "\n"
+			. "Extrait du document : " . $snippet;
+
+		$ch = curl_init(rtrim($ollamaHost, '/') . '/api/generate');
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+		curl_setopt($ch, CURLOPT_POST, true);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
+			'model' => $model,
+			'prompt' => $prompt,
+			'stream' => false,
+		]));
+		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+		$body = curl_exec($ch);
+		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		curl_close($ch);
+
+		if ($body === false || $httpCode >= 400) {
+			$this->logger->error('search_hub: echec generation explication de match', ['httpCode' => $httpCode]);
+			return null;
+		}
+
+		$decoded = json_decode($body, true);
+		$response = trim((string)($decoded['response'] ?? ''));
+		return $response !== '' ? $response : null;
+	}
+
 	private function computeMatchedTerms(string $term, string $title, array $excerpts, array $tags, string $fullContent = ''): array {
 		$words = preg_split('/\s+/u', mb_strtolower(trim($term)));
 		$words = array_values(array_unique(array_filter($words, static function ($w) {

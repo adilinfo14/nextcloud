@@ -370,10 +370,20 @@
 				? '<div class="sh-result-matched">Correspond a : ' + r.matchedTerms.map(esc).join(', ') + '</div>'
 				: '<div class="sh-result-matched sh-result-matched-elsewhere">Correspond ailleurs dans le document</div>';
 
+			// "Pourquoi ce resultat ?" : uniquement en recherche par sens, car en mode
+			// mot-cle le "pourquoi" est deja evident (matchedHtml ci-dessus le montre).
+			var explainHtml = state.neural
+				? '<div class="sh-result-explain">' +
+					'<span class="sh-explain-btn" data-idx="' + idx + '">Pourquoi ce resultat ?</span>' +
+					'<div class="sh-explain-text" id="sh-explain-' + idx + '"></div>' +
+					'</div>'
+				: '';
+
 			return '<div class="sh-result">' +
 				'<a href="' + safeHref(r.link) + '" target="_blank" rel="noopener" class="sh-result-title">' + esc(shortTitle) + '</a>' +
 				excerptsHtml +
 				matchedHtml +
+				explainHtml +
 				'<div class="sh-result-meta">' + meta.join('<span>&middot;</span>') +
 				'<span class="sh-preview-btn" data-idx="' + idx + '">' + esc(previewLabel(r.fileType)) + '</span>' +
 				'</div>' +
@@ -381,6 +391,13 @@
 		}).join('');
 
 		resultsEl.insertAdjacentHTML('beforeend', renderPagination());
+
+		Array.prototype.forEach.call(resultsEl.querySelectorAll('.sh-explain-btn'), function (el) {
+			el.addEventListener('click', function () {
+				var idx = parseInt(el.getAttribute('data-idx'), 10);
+				fetchExplanation(idx, el);
+			});
+		});
 
 		Array.prototype.forEach.call(resultsEl.querySelectorAll('.sh-preview-btn'), function (el) {
 			el.addEventListener('click', function () {
@@ -392,6 +409,40 @@
 		bindSortSelect();
 		bindWeightInputs();
 		bindPagination();
+	}
+
+	function fetchExplanation(idx, btnEl) {
+		var r = lastData.results[idx];
+		var targetEl = document.getElementById('sh-explain-' + idx);
+		if (!targetEl) {
+			return;
+		}
+
+		btnEl.textContent = 'Generation en cours...';
+		btnEl.classList.add('sh-explain-loading');
+
+		var snippet = (r.excerpts && r.excerpts[0]) ? r.excerpts[0] : (r.fullContent ? r.fullContent.slice(0, 400) : '');
+		var params = new URLSearchParams({
+			term: state.term,
+			title: r.title,
+			snippet: snippet,
+		});
+
+		fetch(OC.generateUrl('/apps/search_hub/api/explain-match') + '?' + params.toString(), {
+			headers: { requesttoken: OC.requestToken },
+		})
+			.then(function (resp) { return resp.json(); })
+			.then(function (data) {
+				btnEl.style.display = 'none';
+				targetEl.textContent = data.explanation || 'Explication indisponible pour ce resultat.';
+				targetEl.classList.add('open');
+			})
+			.catch(function () {
+				btnEl.textContent = 'Pourquoi ce resultat ?';
+				btnEl.classList.remove('sh-explain-loading');
+				targetEl.textContent = 'Erreur lors de la generation de l\'explication.';
+				targetEl.classList.add('open');
+			});
 	}
 
 	function renderPagination() {
