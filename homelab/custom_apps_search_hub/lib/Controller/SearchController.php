@@ -237,7 +237,9 @@ class SearchController extends Controller {
 
 	/**
 	 * "Recherche par sens" : recherche par similarite vectorielle (kNN Elasticsearch,
-	 * embeddings nomic-embed-text via Ollama), en complement de la recherche par mot-cle
+	 * embeddings mxbai-embed-large via Ollama - etat de l'art MTEB pour sa categorie,
+	 * champ "embedding_vector_v2" 1024 dim, cf. embed_backfill.php), en complement de la
+	 * recherche par mot-cle
 	 * de search(). Necessite un requete directe a Elasticsearch (l'API publique
 	 * IFullTextSearchManager ne supporte pas kNN) : le controle d'acces normalement
 	 * assure par cette API est donc reproduit manuellement ici (buildAccessFilterShould())
@@ -279,7 +281,10 @@ class SearchController extends Controller {
 			return new JSONResponse(['error' => 'search_unavailable'], 503);
 		}
 
-		$vector = $this->embedText('search_query: ' . $term);
+		// Convention de prefixe mxbai-embed-large (verifiee via la doc Ollama officielle,
+		// pas devinee) : SEULE la requete recoit ce prefixe d'instruction - les passages
+		// eux (embed_backfill.php) sont embarques sans aucun prefixe.
+		$vector = $this->embedText('Represent this sentence for searching relevant passages: ' . $term);
 		if ($vector === null) {
 			$this->logger->error('search_hub: echec embedding de la requete (recherche neuronale)');
 			return new JSONResponse(['error' => 'search_failed'], 500);
@@ -293,7 +298,7 @@ class SearchController extends Controller {
 			'size' => $passageK,
 			'_source' => ['parent_id', 'chunk_text', 'chunk_index'],
 			'knn' => [
-				'field' => 'embedding_vector',
+				'field' => 'embedding_vector_v2',
 				'query_vector' => $vector,
 				'k' => $passageK,
 				'num_candidates' => $passageK * 3,
@@ -669,13 +674,17 @@ class SearchController extends Controller {
 
 	private function embedText(string $text): ?array {
 		$ollamaHost = $this->appConfig->getValueString('search_hub', 'ollama_host', 'http://ollama:11434');
-		$model = $this->appConfig->getValueString('search_hub', 'embedding_model', 'nomic-embed-text');
+		$model = $this->appConfig->getValueString('search_hub', 'embedding_model', 'mxbai-embed-large');
 
+		// num_batch : evite le plantage Ollama "unable to fit entire input in a batch" sur
+		// un texte long (cf. embed_backfill.php) - les requetes utilisateur restent courtes
+		// (MAX_TERM_LENGTH=300) donc jamais concernees en pratique, mais coherence assuree
+		// si cette limite change un jour.
 		$ch = curl_init(rtrim($ollamaHost, '/') . '/api/embeddings');
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 		curl_setopt($ch, CURLOPT_TIMEOUT, 15);
 		curl_setopt($ch, CURLOPT_POST, true);
-		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['model' => $model, 'prompt' => $text]));
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['model' => $model, 'prompt' => $text, 'options' => ['num_batch' => 4096, 'num_ctx' => 4096]]));
 		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
 		$body = curl_exec($ch);
 		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);

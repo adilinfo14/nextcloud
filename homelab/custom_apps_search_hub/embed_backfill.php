@@ -1,30 +1,43 @@
 <?php
-// Backfill des embeddings (nomic-embed-text, 768 dim) pour Recherche+ - mode
-// "Recherche par sens". Script autonome (pas de bootstrap Nextcloud necessaire).
+// Backfill des embeddings pour Recherche+ - mode "Recherche par sens". Script
+// autonome (pas de bootstrap Nextcloud necessaire).
 //
-// v2 (2026-07-14) : passage au DECOUPAGE EN PASSAGES (chunking) plutot qu'un seul
-// vecteur par document entier. Raison : un vecteur unique calcule sur les 800
-// premiers caracteres d'un document long ne represente que son debut - si le
-// passage pertinent est au milieu ou a la fin, la recherche par sens le rate. Chaque
-// document REEL et ELIGIBLE est maintenant decoupe en passages de ~900 caracteres
-// (chevauchement 150 car.) ; CHAQUE passage devient un document Elasticsearch
-// LEGER a part entiere (id "<providerId>:<documentId>:p<N>"), avec son propre
-// vecteur et une COPIE des champs d'acces du document parent (owner/users/groups/
-// circles) pour que le filtre d'acces de searchNeural() fonctionne identiquement
-// passage par passage. Le document original garde son "content" complet (utilise
-// par la recherche mot-cle et la previsualisation) mais N'A PLUS de champ
-// embedding_vector - la recherche par sens ne cible plus que les passages, dedupliques
-// par document parent a la lecture (voir SearchController::searchNeural()).
+// v3 (2026-07-14, meme journee que v2) : deux changements de fond par rapport a v2,
+// tous deux documentes en detail dans la page wiki "23 Architecture de Recherche+" :
+//
+// 1. MODELE D'EMBEDDING : nomic-embed-text (768 dim) -> mxbai-embed-large (1024 dim).
+//    Raison : mxbai-embed-large est etat de l'art pour sa categorie sur le benchmark
+//    MTEB (verifie via recherche externe, pas suppose), deja disponible sur l'Ollama de
+//    ce serveur, et empiriquement plus rapide ET plus robuste ici (encaisse un texte de
+//    12 000 caracteres SANS meme avoir besoin de num_batch, contrairement a
+//    nomic-embed-text qui plantait des ~800-1500 caracteres). Convention de prefixe
+//    DIFFERENTE et importante a respecter (verifiee via la doc Ollama officielle, pas
+//    devinee) : les PASSAGES/documents s'embarquent SANS prefixe, seule la REQUETE
+//    utilisateur recoit le prefixe "Represent this sentence for searching relevant
+//    passages: " (voir SearchController::embedText()). Champ Elasticsearch renomme
+//    embedding_vector -> embedding_vector_v2 (dims 768 vs 1024 : Elasticsearch refuse
+//    de changer les dims d'un champ dense_vector existant, meme vide - verifie
+//    directement, pas suppose).
+//
+// 2. DECOUPAGE : passage d'un decoupage BRUT au nombre de caracteres (risque de couper
+//    en plein milieu d'une phrase ou d'un mot) a un decoupage RECURSIF qui respecte les
+//    frontieres naturelles du texte (paragraphes, puis phrases si un paragraphe est
+//    trop long, puis un decoupage brut en tout dernier recours si une "phrase" seule
+//    depasse deja la taille cible - ex: un tableau sans ponctuation). Meme philosophie
+//    que le RecursiveCharacterTextSplitter de LangChain, reimplementee en PHP (pas de
+//    nouvelle dependance) plutot qu'ajouter un outil/service externe.
 //
 // Incremental par construction : ne traite que les documents pas encore marques
-// "chunked" (voir la requete scroll plus bas) - a re-executer periodiquement (cron)
+// "chunked_v2" (voir la requete scroll plus bas) - a re-executer periodiquement (cron)
 // pour rattraper les nouveaux documents indexes depuis.
 //
-// Piege important (trouve en prod le 2026-07-13) : nomic-embed-text plante avec un
-// panic Ollama ("caching disabled but unable to fit entire input in a batch") si le
-// texte envoye depasse la taille de batch du modele (~512 tokens). D'ou CHUNK_SIZE
-// volontairement conservateur (900 car.) + un retry automatique avec un texte plus
-// court en cas d'echec, plutot que de perdre le passage silencieusement.
+// Piege important (trouve en prod le 2026-07-13, VRAIE cause identifiee le 2026-07-14) :
+// nomic-embed-text plantait avec un panic Ollama ("caching disabled but unable to fit
+// entire input in a batch") des que le texte depassait la taille de BATCH par defaut du
+// serveur d'inference (512), PAS une vraie limite du modele - resolu en passant
+// options.num_batch=4096 a l'appel. mxbai-embed-large n'a pas montre ce probleme dans
+// les tests menes (jusqu'a 12 000 caracteres), mais num_batch est laisse actif par
+// prudence (n'a aucun cout observe).
 //
 // 2e piege trouve le 2026-07-14 : un dossier (ou fichier quasi vide) n'a PAS de
 // "content" mais A un titre ("Notes", "Photos", "Mon Iphone"...) - embarquer
@@ -50,18 +63,24 @@
 $elasticHost = 'http://elasticsearch:9200';
 $elasticIndex = 'nextcloud_tkonsulting';
 $ollamaHost = 'http://ollama:11434';
-$model = 'nomic-embed-text';
+$model = 'mxbai-embed-large';
+$vectorField = 'embedding_vector_v2';
+$chunkedMarker = 'chunked_v2';
 $batchSize = 20;
-$chunkSize = 900;
-$chunkOverlap = 150;
+$chunkSize = 6000;
+$chunkOverlap = 500;
 $chunkSizeRetry = 350;
+$embedOptions = ['num_batch' => 4096, 'num_ctx' => 4096];
 $minContentLen = 20;
 // Plafond decouvert en prod le 2026-07-14 : un vrai livre PDF de 2.8 Mo ("Intelligence
-// artificielle" de John Paul Mueller) a produit 1182 passages a lui seul, ralentissant
-// le backfill de facon disproportionnee pour un seul document. Au-dela de ce plafond,
-// on repartit les chunks UNIFORMEMENT sur tout le document (pas juste le debut) pour
-// garder une couverture representative plutot que de tronquer bêtement au debut.
-$maxChunksPerDoc = 40;
+// artificielle" de John Paul Mueller) a produit des centaines de passages a lui seul.
+// Le cout d'avoir PLUS de passages est uniquement la duree du backfill (job de fond
+// nocturne, zero impact utilisateur) - PAS la vitesse de recherche (le volume de
+// l'index n'affecte quasiment pas le temps d'une requete kNN, et les passages sont de
+// toute facon deduppliques par document parent a la lecture). Au-dela de ce plafond
+// (documents exceptionnellement volumineux), on repartit les chunks UNIFORMEMENT sur
+// tout le document (pas juste le debut) pour garder une couverture representative.
+$maxChunksPerDoc = 200;
 $imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'heic', 'heif', 'webp', 'tiff', 'tif'];
 $demoPathPrefixes = ['Modèles/', 'Templates/', 'Notes/'];
 $demoExactTitles = [
@@ -94,12 +113,16 @@ function esCurl(string $method, string $url, ?array $body = null): array {
 	return is_array($decoded) ? $decoded : ['error' => 'bad_json', 'raw' => $raw];
 }
 
-function embed(string $ollamaHost, string $model, string $text): ?array {
+function embed(string $ollamaHost, string $model, string $text, array $options = []): ?array {
+	$payload = ['model' => $model, 'prompt' => $text];
+	if (!empty($options)) {
+		$payload['options'] = $options;
+	}
 	$ch = curl_init($ollamaHost . '/api/embeddings');
 	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 	curl_setopt($ch, CURLOPT_TIMEOUT, 60);
 	curl_setopt($ch, CURLOPT_POST, true);
-	curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['model' => $model, 'prompt' => $text]));
+	curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
 	curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
 	$raw = curl_exec($ch);
 	curl_close($ch);
@@ -111,8 +134,14 @@ function embed(string $ollamaHost, string $model, string $text): ?array {
 	return is_array($vector) ? $vector : null;
 }
 
-/** @return string[] */
-function splitIntoChunks(string $text, int $chunkSize, int $overlap): array {
+/**
+ * Decoupage brut au nombre de caracteres - dernier recours seulement, quand aucune
+ * frontiere naturelle (paragraphe, phrase) n'est trouvable dans le texte a decouper
+ * (ex: un tableau, une longue liste sans ponctuation de fin de phrase).
+ *
+ * @return string[]
+ */
+function hardSplitChars(string $text, int $chunkSize, int $overlap): array {
 	$text = trim($text);
 	$len = mb_strlen($text);
 	if ($len === 0) {
@@ -122,20 +151,121 @@ function splitIntoChunks(string $text, int $chunkSize, int $overlap): array {
 		return [$text];
 	}
 
-	$chunks = [];
+	$pieces = [];
 	$start = 0;
 	$step = max(1, $chunkSize - $overlap);
 	while ($start < $len) {
-		$chunk = trim(mb_substr($text, $start, $chunkSize));
-		if (mb_strlen($chunk) >= 20) {
-			$chunks[] = $chunk;
+		$piece = trim(mb_substr($text, $start, $chunkSize));
+		if (mb_strlen($piece) >= 20) {
+			$pieces[] = $piece;
 		}
 		if ($start + $chunkSize >= $len) {
 			break;
 		}
 		$start += $step;
 	}
-	return $chunks;
+	return $pieces;
+}
+
+/**
+ * Decoupe un paragraphe trop long en phrases (frontiere = ponctuation de fin de
+ * phrase suivie d'un espace), puis regroupe ces phrases en "unites" sous chunkSize.
+ * Si une phrase seule depasse deja chunkSize (rare), retombe sur hardSplitChars()
+ * pour CETTE phrase uniquement.
+ *
+ * @return string[]
+ */
+function splitParagraphIntoSentenceUnits(string $paragraph, int $chunkSize, int $overlap): array {
+	$sentences = preg_split('/(?<=[.!?])\s+/u', $paragraph) ?: [$paragraph];
+
+	$units = [];
+	$buffer = '';
+	foreach ($sentences as $sentence) {
+		$sentence = trim($sentence);
+		if ($sentence === '') {
+			continue;
+		}
+
+		if (mb_strlen($sentence) > $chunkSize) {
+			if ($buffer !== '') {
+				$units[] = $buffer;
+				$buffer = '';
+			}
+			foreach (hardSplitChars($sentence, $chunkSize, $overlap) as $piece) {
+				$units[] = $piece;
+			}
+			continue;
+		}
+
+		$candidate = $buffer === '' ? $sentence : $buffer . ' ' . $sentence;
+		if (mb_strlen($candidate) > $chunkSize && $buffer !== '') {
+			$units[] = $buffer;
+			$buffer = $sentence;
+		} else {
+			$buffer = $candidate;
+		}
+	}
+	if ($buffer !== '') {
+		$units[] = $buffer;
+	}
+
+	return $units;
+}
+
+/**
+ * Decoupage RECURSIF respectant les frontieres naturelles du texte : paragraphes
+ * d'abord (separateur "ligne(s) vide(s)"), puis phrases si un paragraphe depasse
+ * chunkSize a lui seul, puis decoupage brut en tout dernier recours. Les "unites"
+ * ainsi obtenues (chacune deja sous chunkSize) sont ensuite regroupees en chunks
+ * finaux avec un chevauchement approximatif entre deux chunks consecutifs - meme
+ * philosophie que le RecursiveCharacterTextSplitter de LangChain.
+ *
+ * @return string[]
+ */
+function splitIntoChunks(string $text, int $chunkSize, int $overlap): array {
+	$text = trim($text);
+	if ($text === '') {
+		return [];
+	}
+	if (mb_strlen($text) <= $chunkSize) {
+		return [$text];
+	}
+
+	$paragraphs = preg_split('/\n\s*\n/u', $text) ?: [$text];
+
+	$units = [];
+	foreach ($paragraphs as $paragraph) {
+		$paragraph = trim($paragraph);
+		if ($paragraph === '') {
+			continue;
+		}
+		if (mb_strlen($paragraph) <= $chunkSize) {
+			$units[] = $paragraph;
+		} else {
+			foreach (splitParagraphIntoSentenceUnits($paragraph, $chunkSize, $overlap) as $unit) {
+				$units[] = $unit;
+			}
+		}
+	}
+
+	// Regroupe les unites (deja sous chunkSize) en chunks finaux, avec chevauchement.
+	$chunks = [];
+	$current = '';
+	foreach ($units as $unit) {
+		$candidate = $current === '' ? $unit : $current . "\n\n" . $unit;
+		if (mb_strlen($candidate) > $chunkSize && $current !== '') {
+			$chunks[] = trim($current);
+			$overlapText = mb_substr($current, max(0, mb_strlen($current) - $overlap));
+			$current = trim($overlapText) . "\n\n" . $unit;
+		} else {
+			$current = $candidate;
+		}
+	}
+	if (trim($current) !== '') {
+		$chunks[] = trim($current);
+	}
+
+	return array_values(array_filter($chunks, static fn ($c) => mb_strlen($c) >= 20));
 }
 
 $scrollUrl = $elasticHost . '/' . $elasticIndex . '/_search?scroll=5m';
@@ -145,7 +275,7 @@ $result = esCurl('POST', $scrollUrl, [
 	'query' => [
 		'bool' => [
 			'must_not' => [
-				['exists' => ['field' => 'chunked']],
+				['exists' => ['field' => $chunkedMarker]],
 				['exists' => ['field' => 'parent_id']], // ne jamais re-traiter un passage lui-meme
 			],
 		],
@@ -220,10 +350,10 @@ while (true) {
 			// Echantillonnage UNIFORME sur tout le document (pas juste les $maxChunksPerDoc
 			// premiers) : garde une couverture representative du debut a la fin plutot que
 			// de ne jamais voir la deuxieme moitie d'un document tres long.
-			$total = count($textChunks);
+			$totalChunks = count($textChunks);
 			$sampled = [];
 			for ($k = 0; $k < $maxChunksPerDoc; $k++) {
-				$sampled[] = $textChunks[(int)floor($k * ($total - 1) / max(1, $maxChunksPerDoc - 1))];
+				$sampled[] = $textChunks[(int)floor($k * ($totalChunks - 1) / max(1, $maxChunksPerDoc - 1))];
 			}
 			$textChunks = array_values(array_unique($sampled));
 		}
@@ -238,14 +368,16 @@ while (true) {
 		$chunkFailure = false;
 		$createdForThisDoc = 0;
 		foreach ($textChunks as $i => $chunkText) {
-			// Le titre est prefixe a chaque passage : donne du contexte au modele
-			// d'embedding (sans lui, un passage isole du milieu d'un document perd le
-			// sujet general) et permet aussi de matcher directement sur le titre seul.
-			$embedInput = 'search_document: ' . $title . "\n" . $chunkText;
+			// Le titre est prefixe a chaque passage (contexte pour le modele + permet de
+			// matcher sur le titre seul), mais SANS le prefixe "search_document:" de
+			// nomic-embed-text : mxbai-embed-large attend les documents SANS prefixe -
+			// seule la requete utilisateur recoit un prefixe (voir SearchController).
+			$embedInput = $title . "\n" . $chunkText;
 
-			$vector = embed($ollamaHost, $model, mb_substr($embedInput, 0, $chunkSize + 200));
+			$vector = embed($ollamaHost, $model, mb_substr($embedInput, 0, $chunkSize + 200), $embedOptions);
 			if ($vector === null) {
-				$vector = embed($ollamaHost, $model, mb_substr('search_document: ' . $title . "\n" . mb_substr($chunkText, 0, $chunkSizeRetry), 0, $chunkSizeRetry + 200));
+				// Filet de securite pour un cas extreme non anticipe.
+				$vector = embed($ollamaHost, $model, mb_substr($title . "\n" . mb_substr($chunkText, 0, $chunkSizeRetry), 0, $chunkSizeRetry + 200), $embedOptions);
 			}
 			if ($vector === null) {
 				$chunkFailure = true;
@@ -257,7 +389,7 @@ while (true) {
 				'parent_id' => $id,
 				'chunk_index' => $i,
 				'chunk_text' => $chunkText,
-				'embedding_vector' => $vector,
+				$vectorField => $vector,
 			]);
 			$putResult = esCurl('PUT', $elasticHost . '/' . $elasticIndex . '/_doc/' . rawurlencode($id . ':p' . $i), $chunkDoc);
 			if (isset($putResult['error'])) {
@@ -271,17 +403,13 @@ while (true) {
 
 		if ($createdForThisDoc > 0) {
 			// Marque le document parent comme traite (evite de le retraiter au prochain
-			// passage du cron) et retire un eventuel embedding_vector residuel de
-			// l'ancienne approche "un seul vecteur par document" (v1).
+			// passage du cron).
 			$markResult = esCurl('POST', $elasticHost . '/' . $elasticIndex . '/_update/' . rawurlencode($id), [
-				'script' => [
-					'lang' => 'painless',
-					'source' => "ctx._source.chunked = true; if (ctx._source.containsKey('embedding_vector')) { ctx._source.remove('embedding_vector'); }",
-				],
+				'doc' => [$chunkedMarker => true],
 			]);
 			if (isset($markResult['error'])) {
 				$errors++;
-				echo "ERREUR marquage chunked $id : " . json_encode($markResult) . "\n";
+				echo "ERREUR marquage $chunkedMarker $id : " . json_encode($markResult) . "\n";
 			} else {
 				$documentsChunked++;
 			}
