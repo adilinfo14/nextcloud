@@ -36,6 +36,8 @@ services:
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.noschoixpourvous.com
       - PHP_MEMORY_LIMIT=1536M
+      - LANG=en_US.UTF-8
+      - LC_ALL=en_US.UTF-8
       - REDIS_HOST=redis
     extra_hosts:
       - "nextcloud.noschoixpourvous.com:host-gateway"
