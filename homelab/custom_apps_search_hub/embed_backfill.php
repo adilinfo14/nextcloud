@@ -26,6 +26,16 @@
 // qui passe le filtre MIN_CONTENT_LEN mais n'a evidemment aucun sens. D'ou l'exclusion
 // explicite des extensions image (les photos n'ont rien a faire dans une recherche
 // SEMANTIQUE par definition - aucun contenu textuel reel a comparer).
+//
+// 4e piege trouve le 2026-07-14 (meme session, signale par l'utilisateur) : un
+// document avec du VRAI contenu coherent (ex: "Modeles/Menu.odt", un menu de
+// restaurant complet) peut quand meme ressortir sans rapport avec une requete
+// technique - pas un bug d'embedding, mais du bruit STRUCTUREL : "Modeles/" est le
+// pack de modeles Office LIVRE PAR DEFAUT avec toute installation Nextcloud (Menu,
+// Facture, CV, Certificat...), jamais du vrai contenu utilisateur. Deja identifie
+// comme tel dans ce projet (cf. exclusion similaire faite pour la bibliotheque de
+// documents Tables) - meme logique appliquee ici : exclure les dossiers de demo
+// connus du skeleton Nextcloud plutot que de les embarquer.
 
 $elasticHost = 'http://elasticsearch:9200';
 $elasticIndex = 'nextcloud_tkonsulting';
@@ -36,6 +46,8 @@ $textMaxLen = 800;
 $textMaxLenRetry = 300;
 $minContentLen = 20;
 $imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'heic', 'heif', 'webp', 'tiff', 'tif'];
+$demoPathPrefixes = ['Modèles/', 'Templates/', 'Notes/'];
+$demoExactTitles = ['Documents/Example.md'];
 
 function esCurl(string $method, string $url, ?array $body = null): array {
 	$ch = curl_init($url);
@@ -108,6 +120,20 @@ while (true) {
 		$content = (string)($source['content'] ?? '');
 		$parts = $source['parts'] ?? [];
 		$partsText = is_array($parts) ? implode(' ', array_filter($parts, 'is_string')) : '';
+
+		$isDemo = in_array($title, $demoExactTitles, true);
+		if (!$isDemo) {
+			foreach ($demoPathPrefixes as $prefix) {
+				if (str_starts_with($title, $prefix)) {
+					$isDemo = true;
+					break;
+				}
+			}
+		}
+		if ($isDemo) {
+			$skipped++;
+			continue;
+		}
 
 		$ext = strtolower(pathinfo($title, PATHINFO_EXTENSION));
 		if (in_array($ext, $imageExtensions, true)) {
