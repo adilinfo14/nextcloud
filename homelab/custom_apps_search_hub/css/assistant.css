@@ -1,35 +1,91 @@
+#content.app-search-hub {
+	background:
+		radial-gradient(ellipse 900px 500px at 50% 15%, rgba(201, 168, 76, 0.07), transparent 65%),
+		var(--color-main-background);
+}
+
 #as-app {
-	max-width: 760px;
+	max-width: 720px;
 	margin: 0 auto;
-	padding: 2rem 1.5rem;
+	padding: 0 1.5rem;
 	display: flex;
 	flex-direction: column;
 	height: calc(100vh - 50px);
 	box-sizing: border-box;
 }
 
+/* ---------- Bloc central (icone + titre + formulaire + suggestions) ---------- */
+
+#as-center {
+	order: 2;
+	flex: none;
+	width: 100%;
+}
+
+#as-icon {
+	width: 2.75rem;
+	height: 2.75rem;
+	margin: 0 auto 1rem;
+	border-radius: 50%;
+	border: 1px solid var(--color-primary-element, #c9a84c);
+	color: var(--color-primary-element, #c9a84c);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 1.2rem;
+}
+
 #as-header {
+	text-align: center;
 	margin-bottom: 1.5rem;
 }
 
 #as-header h1 {
-	font-size: 1.4rem;
-	margin: 0 0 0.3rem;
+	font-size: 1.55rem;
+	margin: 0 0 0.5rem;
 }
 
 #as-subtitle {
 	color: var(--color-text-maxcontrast);
-	font-size: 0.88rem;
-	margin: 0;
+	font-size: 0.92rem;
+	margin: 0 auto;
+	max-width: 46ch;
 }
 
+#as-suggestions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 0.55rem;
+	margin-top: 1.1rem;
+}
+
+.as-suggestion-chip {
+	font-size: 0.82rem;
+	color: var(--color-text-maxcontrast);
+	background: var(--color-background-hover);
+	border: 1px solid var(--color-border);
+	border-radius: 999px;
+	padding: 0.5rem 1rem;
+	cursor: pointer;
+	transition: border-color 0.15s, color 0.15s;
+}
+
+.as-suggestion-chip:hover {
+	border-color: var(--color-primary-element, #c9a84c);
+	color: var(--color-main-text);
+}
+
+/* ---------- Fil de conversation ---------- */
+
 #as-thread {
+	display: none;
+	order: 1;
 	flex: 1;
 	overflow-y: auto;
-	display: flex;
 	flex-direction: column;
 	gap: 1rem;
-	padding-bottom: 1rem;
+	padding: 1.75rem 0 1rem;
 }
 
 .as-message {
@@ -46,21 +102,23 @@
 
 .as-bubble {
 	max-width: 85%;
-	padding: 0.85rem 1.1rem;
-	border-radius: 12px;
+	padding: 0.9rem 1.15rem;
+	border-radius: 14px;
 	border: 1px solid var(--color-border);
-	font-size: 0.92rem;
-	line-height: 1.55;
+	font-size: 0.93rem;
+	line-height: 1.6;
 }
 
 .as-message-user .as-bubble {
 	background: var(--color-primary-element, #c9a84c);
 	color: var(--color-primary-element-text, #1a1a1a);
 	border-color: transparent;
+	border-bottom-right-radius: 4px;
 }
 
 .as-message-assistant .as-bubble {
 	background: var(--color-background-hover);
+	border-bottom-left-radius: 4px;
 }
 
 .as-message-abstained .as-bubble {
@@ -69,16 +127,19 @@
 	gap: 0.6rem;
 	color: var(--color-text-maxcontrast);
 	font-style: italic;
+	background: transparent;
+	border-style: dashed;
 }
 
 .as-abstain-icon {
-	color: var(--color-warning, #c98f4c);
+	color: var(--color-primary-element, #c9a84c);
 	flex: none;
 }
 
 .as-message-error .as-bubble {
-	color: var(--color-error);
-	border-color: var(--color-error);
+	color: #e08585;
+	border-color: #e08585;
+	background: rgba(224, 133, 133, 0.08);
 }
 
 .as-answer-text { white-space: pre-wrap; }
@@ -101,24 +162,24 @@
 	font-size: 0.7rem;
 	font-weight: 600;
 	letter-spacing: 0.02em;
-	padding: 0.15rem 0.5rem;
-	border-radius: 4px;
-	margin-top: 0.7rem;
+	padding: 0.18rem 0.55rem;
+	border-radius: 999px;
+	margin-top: 0.75rem;
 }
 
 .as-badge-verified {
-	color: #5c9d6b;
-	background: rgba(92, 157, 107, 0.14);
+	color: #7ea988;
+	background: rgba(126, 169, 136, 0.14);
 }
 
 .as-badge-corrected {
-	color: #c98f4c;
-	background: rgba(201, 143, 76, 0.14);
+	color: #c9a84c;
+	background: rgba(201, 168, 76, 0.14);
 }
 
 .as-sources {
-	margin-top: 0.75rem;
-	padding-top: 0.75rem;
+	margin-top: 0.8rem;
+	padding-top: 0.8rem;
 	border-top: 1px solid var(--color-border);
 	display: flex;
 	flex-direction: column;
@@ -126,9 +187,9 @@
 }
 
 .as-sources-label {
-	font-size: 0.72rem;
+	font-size: 0.7rem;
 	text-transform: uppercase;
-	letter-spacing: 0.05em;
+	letter-spacing: 0.06em;
 	color: var(--color-text-maxcontrast);
 }
 
@@ -137,10 +198,11 @@
 	color: var(--color-main-text);
 	text-decoration: none;
 	border: 1px solid var(--color-border);
-	border-radius: 6px;
-	padding: 0.3rem 0.6rem;
+	border-radius: 8px;
+	padding: 0.35rem 0.65rem;
 	display: inline-block;
 	width: fit-content;
+	transition: border-color 0.15s;
 }
 
 .as-source-chip:hover {
@@ -149,13 +211,13 @@
 
 .as-spinner {
 	display: inline-block;
-	width: 0.8rem;
-	height: 0.8rem;
+	width: 0.85rem;
+	height: 0.85rem;
 	border: 2px solid var(--color-border);
 	border-top-color: var(--color-primary-element, #c9a84c);
 	border-radius: 50%;
 	animation: as-spin 0.8s linear infinite;
-	margin-right: 0.3rem;
+	margin-right: 0.4rem;
 	vertical-align: -1px;
 }
 
@@ -163,28 +225,71 @@
 	to { transform: rotate(360deg); }
 }
 
+/* ---------- Formulaire ---------- */
+
 #as-form {
 	display: flex;
 	gap: 0.6rem;
-	padding-top: 1rem;
-	border-top: 1px solid var(--color-border);
 }
 
 #as-input {
 	flex: 1;
-	padding: 0.7rem 1rem;
-	border-radius: 8px;
+	padding: 0.85rem 1.15rem;
+	border-radius: 12px;
 	border: 1px solid var(--color-border);
 	background: var(--color-main-background);
 	color: var(--color-main-text);
-	font-size: 0.94rem;
+	font-size: 0.96rem;
+	transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 #as-input:focus {
 	border-color: var(--color-primary-element, #c9a84c);
 	outline: none;
+	box-shadow: 0 0 0 3px rgba(201, 168, 76, 0.14);
 }
 
 #as-submit {
-	padding: 0.7rem 1.3rem;
+	padding: 0.7rem 1.4rem;
+	border-radius: 12px;
+	font-weight: 600;
+}
+
+/* ---------- Etat vide : bloc central occupant l'ecran, fil masque ---------- */
+
+#as-app.as-empty {
+	justify-content: center;
+}
+
+#as-app.as-empty #as-center {
+	order: 0;
+}
+
+#as-app.as-empty #as-thread {
+	display: none;
+}
+
+/* ---------- Etat actif (conversation en cours) : fil au-dessus, formulaire ancre en bas ---------- */
+
+#as-app:not(.as-empty) {
+	justify-content: flex-start;
+}
+
+#as-app:not(.as-empty) #as-thread {
+	display: flex;
+}
+
+#as-app:not(.as-empty) #as-header,
+#as-app:not(.as-empty) #as-suggestions {
+	display: none;
+}
+
+#as-app:not(.as-empty) #as-center {
+	border-top: 1px solid var(--color-border);
+	padding: 1rem 0;
+}
+
+@media (max-width: 600px) {
+	#as-app { padding: 0 1rem; }
+	.as-bubble { max-width: 92%; }
 }

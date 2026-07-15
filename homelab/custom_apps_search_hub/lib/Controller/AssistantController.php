@@ -157,6 +157,58 @@ class AssistantController extends Controller {
 	}
 
 	/**
+	 * Point d'entree pour un client MCP (ex: Claude Desktop) - AUCUNE generation ni
+	 * verification locale ici : Claude lui-meme fait ce travail cote client, avec un
+	 * modele bien plus capable que le llama3:8b local. Ce endpoint ne fait QUE la
+	 * partie sensible et non-negociable : la recherche filtree par droits (etape 1)
+	 * et le seuil de confiance (etape 2) - Claude ne voit jamais un document hors
+	 * des droits de l'utilisateur qui l'interroge, exactement comme le pipeline complet.
+	 *
+	 * Authentification : mot de passe d'application Nextcloud (Basic Auth), PAS la
+	 * session web - chaque utilisateur Claude Desktop doit avoir son propre mot de
+	 * passe d'application pour que le filtrage par droits s'applique a LUI, jamais un
+	 * compte de service partage qui casserait tout le principe de l'architecture.
+	 */
+	#[NoAdminRequired]
+	#[NoCSRFRequired]
+	#[UserRateLimit(limit: 30, period: 60)]
+	public function mcpSearch(): JSONResponse {
+		$user = $this->userSession->getUser();
+		if ($user === null) {
+			return new JSONResponse(['error' => 'forbidden'], 403);
+		}
+
+		$question = trim((string)$this->request->getParam('question', ''));
+		if ($question === '') {
+			return new JSONResponse(['error' => 'invalid_params'], 400);
+		}
+		if (mb_strlen($question) > self::MAX_QUESTION_LENGTH) {
+			$question = mb_substr($question, 0, self::MAX_QUESTION_LENGTH);
+		}
+
+		$config = $this->loadConfig();
+		$passages = $this->retrieveGroundedPassages($question, $user);
+
+		$topScore = $passages[0]['score'] ?? 0.0;
+		$minScore = (float)$config['assistant']['minConfidenceScore'];
+		if (empty($passages) || $topScore < $minScore) {
+			$this->logAudit($user, $question, $passages, null, 'mcp_no_results', $topScore);
+			return new JSONResponse(['found' => false, 'passages' => []]);
+		}
+
+		$this->logAudit($user, $question, $passages, null, 'mcp_search', $topScore);
+
+		return new JSONResponse([
+			'found' => true,
+			'passages' => array_map(static fn ($p) => [
+				'title' => $p['title'],
+				'link' => $p['link'],
+				'text' => $p['chunkText'],
+			], $passages),
+		]);
+	}
+
+	/**
 	 * Recherche par sens filtree par droits - reproduit fidelement
 	 * SearchController::searchNeural() (meme embedding, meme filtre d'acces, meme
 	 * regroupement par document parent) mais renvoie une liste plate de passages
@@ -360,7 +412,7 @@ class AssistantController extends Controller {
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 		curl_setopt($ch, CURLOPT_TIMEOUT, 15);
 		curl_setopt($ch, CURLOPT_POST, true);
-		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['model' => $model, 'prompt' => $text, 'options' => ['num_batch' => 4096, 'num_ctx' => 4096]]));
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['model' => $model, 'prompt' => $text, 'keep_alive' => '30m', 'options' => ['num_batch' => 4096, 'num_ctx' => 4096]]));
 		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
 		$body = curl_exec($ch);
 		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -395,7 +447,7 @@ class AssistantController extends Controller {
 			. "QUESTION : " . $question . "\n\n"
 			. "REPONSE (en francais, avec citations [Source N]) :";
 
-		return $this->generateRaw($prompt, $model, 120);
+		return $this->generateRaw($prompt, $model, 130);
 	}
 
 	/**
@@ -426,7 +478,7 @@ class AssistantController extends Controller {
 			. "CORRIGE: <version corrigee ne gardant que les affirmations soutenues>\n"
 			. "NON_SOUTENU (si rien d'important n'est soutenu par les sources)";
 
-		$response = $this->generateRaw($prompt, $model, 120);
+		$response = $this->generateRaw($prompt, $model, 130);
 		if ($response === null) {
 			// Echec du controle lui-meme = on ne peut pas garantir la fiabilite -
 			// prudence : on traite comme non soutenu plutot que de laisser passer.
@@ -460,7 +512,11 @@ class AssistantController extends Controller {
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 		curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
 		curl_setopt($ch, CURLOPT_POST, true);
-		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['model' => $model, 'prompt' => $prompt, 'stream' => false]));
+		// keep_alive : garde le modele charge en memoire 30 min au lieu des 5 min par
+		// defaut d'Ollama - un serveur sans GPU met un temps non-negligeable a recharger
+		// un modele de 4-5 Go a froid, ce qui a deja fait echouer une generation en
+		// conditions reelles (timeout de 120s consomme par le seul rechargement).
+		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['model' => $model, 'prompt' => $prompt, 'stream' => false, 'keep_alive' => '30m']));
 		curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
 		$body = curl_exec($ch);
 		$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);

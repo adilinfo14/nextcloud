@@ -9,6 +9,7 @@ return [
 		['name' => 'search#explainMatch', 'url' => '/api/explain-match', 'verb' => 'GET'],
 		['name' => 'assistant#index', 'url' => '/assistant', 'verb' => 'GET'],
 		['name' => 'assistant#ask', 'url' => '/api/assistant/ask', 'verb' => 'POST'],
+		['name' => 'assistant#mcpSearch', 'url' => '/api/assistant/mcp-search', 'verb' => 'POST'],
 		['name' => 'status#get', 'url' => '/admin/status', 'verb' => 'GET'],
 		['name' => 'status#reindex', 'url' => '/admin/reindex', 'verb' => 'POST'],
 		['name' => 'status#reindexEmbeddings', 'url' => '/admin/reindex-embeddings', 'verb' => 'POST'],

@@ -1,0 +1,14 @@
+{
+  "name": "mcp-nextcloud-search",
+  "version": "1.0.0",
+  "description": "Serveur MCP exposant la recherche par sens filtree par droits de Recherche+ (Nextcloud TKonsulting) comme outil pour Claude Desktop / Claude Code.",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "mcp-nextcloud-search": "index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  }
+}

@@ -1,6 +1,7 @@
 (function () {
 	'use strict';
 
+	var app = document.getElementById('as-app');
 	var thread = document.getElementById('as-thread');
 	var form = document.getElementById('as-form');
 	var input = document.getElementById('as-input');
@@ -86,6 +87,7 @@
 	}
 
 	function ask(question) {
+		app.classList.remove('as-empty');
 		addUserMessage(question);
 		var pendingEl = addPendingMessage();
 		input.value = '';
@@ -133,5 +135,11 @@
 			return;
 		}
 		ask(question);
+	});
+
+	Array.prototype.forEach.call(document.querySelectorAll('.as-suggestion-chip'), function (chip) {
+		chip.addEventListener('click', function () {
+			ask(chip.getAttribute('data-question'));
+		});
 	});
 })();
