@@ -426,6 +426,35 @@ class StatusController extends Controller {
 	}
 
 	/**
+	 * Reindexation CIBLEE (recherche par sens) sur un ou plusieurs documents precis,
+	 * identifies par un terme de recherche sur leur titre - complementaire au backfill
+	 * incremental (reindexEmbeddings ci-dessus) qui ne traite que les documents jamais
+	 * encore vus. Demande utilisateur du 2026-07-15 : pouvoir forcer l'indexation
+	 * sans attendre le cron quotidien de 4h15, sur un document precis plutot que tout
+	 * le corpus. Voir embed_single.php pour la logique (force le retraitement, ignore
+	 * les filtres demo/image/tableur du backfill).
+	 */
+	public function reindexDocument(): JSONResponse {
+		if (!$this->isCurrentUserAdmin()) {
+			return new JSONResponse(['error' => 'forbidden'], 403);
+		}
+
+		$query = trim((string)$this->request->getParam('title', ''));
+		if ($query === '') {
+			return new JSONResponse(['error' => 'missing_title'], 400);
+		}
+
+		$logPath = '/tmp/search_hub_reindex_document.log';
+		$cmd = 'nohup php /var/www/html/custom_apps/search_hub/embed_single.php '
+			. escapeshellarg($query) . ' > ' . escapeshellarg($logPath) . ' 2>&1 & echo $!';
+
+		exec($cmd, $output);
+		$this->logger->info('search_hub: reindexation ciblee declenchee depuis le tableau de bord admin (' . $query . ')');
+
+		return new JSONResponse(['started' => true, 'pid' => $output[0] ?? null]);
+	}
+
+	/**
 	 * Synchronisation du connecteur iaeasy : resync COMPLETE (pas incrementale, voir
 	 * en-tete d'iaeasy_index.php) depuis l'API publique iaeasy.noschoixpourvous.com,
 	 * quelques secondes a quelques minutes selon Ollama - meme pattern de declenchement
@@ -485,6 +514,7 @@ class StatusController extends Controller {
 		$files = [
 			'reindex' => ['path' => '/tmp/search_hub_reindex.log', 'label' => 'Derniere reindexation manuelle (mot-cle)'],
 			'embedBackfill' => ['path' => '/tmp/search_hub_embed_backfill.log', 'label' => 'Dernier backfill manuel (embeddings)'],
+			'reindexDocument' => ['path' => '/tmp/search_hub_reindex_document.log', 'label' => 'Derniere indexation ciblee (document precis)'],
 			'iaeasyIndex' => ['path' => '/tmp/search_hub_iaeasy_index.log', 'label' => 'Derniere synchronisation iaeasy'],
 			'confiaDocIndex' => ['path' => '/tmp/search_hub_confia_doc_index.log', 'label' => 'Derniere synchronisation confia_doc'],
 		];

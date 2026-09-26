@@ -105,6 +105,14 @@
 		html += '</tbody></table>';
 		html += '<button id="nss-embed-reindex-btn" class="button">Lancer le backfill des embeddings maintenant</button>';
 
+		html += '<h4>Indexer un document precis</h4>';
+		html += '<p class="settings-hint">Force la recherche par sens sur un ou plusieurs documents, sans attendre le cron de 4h15 (tape un mot du titre, ex. "ASI-eBook" ou "Formation/rapport").</p>';
+		html += '<div class="nss-field-inline">' +
+			'<input type="text" id="nss-single-doc-input" placeholder="Terme du titre a rechercher">' +
+			'<button id="nss-single-doc-btn" class="button">Indexer maintenant</button>' +
+			'</div>' +
+			'<span id="nss-single-doc-status" class="nss-saved-msg"></span>';
+
 		// --- Connecteurs ---
 		html += '<h3>Connecteurs</h3>';
 		html += '<p class="settings-hint">Une source de contenu indexee dans Recherche+ (chaque connecteur alimente a la fois la recherche mot-cle et la recherche par sens).</p>';
@@ -175,6 +183,20 @@
 			embedBtn.addEventListener('click', triggerEmbedReindex);
 		}
 
+		var singleDocBtn = document.getElementById('nss-single-doc-btn');
+		if (singleDocBtn) {
+			singleDocBtn.addEventListener('click', triggerSingleDocReindex);
+		}
+		var singleDocInput = document.getElementById('nss-single-doc-input');
+		if (singleDocInput) {
+			singleDocInput.addEventListener('keydown', function (ev) {
+				if (ev.key === 'Enter') {
+					ev.preventDefault();
+					triggerSingleDocReindex();
+				}
+			});
+		}
+
 		var iaeasyBtn = document.getElementById('nss-iaeasy-reindex-btn');
 		if (iaeasyBtn) {
 			iaeasyBtn.addEventListener('click', triggerIaeasyReindex);
@@ -229,6 +251,53 @@
 		}).then(function () {
 			setTimeout(load, 3000);
 		});
+	}
+
+	function triggerSingleDocReindex() {
+		var input = document.getElementById('nss-single-doc-input');
+		var status = document.getElementById('nss-single-doc-status');
+		var btn = document.getElementById('nss-single-doc-btn');
+		var title = input ? input.value.trim() : '';
+		if (!title) {
+			if (status) {
+				status.textContent = 'Tape un mot du titre d\'abord.';
+			}
+			return;
+		}
+		if (btn) {
+			btn.disabled = true;
+		}
+		if (status) {
+			status.textContent = 'Indexation lancee en tache de fond...';
+		}
+		fetch(OC.generateUrl('/apps/search_hub/admin/reindex-document'), {
+			method: 'POST',
+			headers: { requesttoken: OC.requestToken, 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: 'title=' + encodeURIComponent(title),
+		})
+			.then(function (r) { return r.json(); })
+			.then(function (result) {
+				if (btn) {
+					btn.disabled = false;
+				}
+				if (result.started) {
+					if (status) {
+						status.textContent = 'Lance - resultat visible dans les logs ci-dessous dans quelques secondes.';
+					}
+					setTimeout(loadLogs, 4000);
+					setTimeout(loadLogs, 10000);
+				} else if (status) {
+					status.textContent = 'Erreur : ' + (result.error || 'inconnue');
+				}
+			})
+			.catch(function () {
+				if (btn) {
+					btn.disabled = false;
+				}
+				if (status) {
+					status.textContent = 'Erreur reseau.';
+				}
+			});
 	}
 
 	function triggerIaeasyReindex() {

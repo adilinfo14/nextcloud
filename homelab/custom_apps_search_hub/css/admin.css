@@ -133,3 +133,15 @@
 	color: var(--color-success, #2d7d46);
 	font-weight: bold;
 }
+
+#nc-search-status .nss-field-inline {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	margin: 8px 0;
+	max-width: 480px;
+}
+
+#nc-search-status .nss-field-inline input[type="text"] {
+	flex: 1;
+}

@@ -13,6 +13,7 @@ return [
 		['name' => 'status#get', 'url' => '/admin/status', 'verb' => 'GET'],
 		['name' => 'status#reindex', 'url' => '/admin/reindex', 'verb' => 'POST'],
 		['name' => 'status#reindexEmbeddings', 'url' => '/admin/reindex-embeddings', 'verb' => 'POST'],
+		['name' => 'status#reindexDocument', 'url' => '/admin/reindex-document', 'verb' => 'POST'],
 		['name' => 'status#reindexIaeasy', 'url' => '/admin/reindex-iaeasy', 'verb' => 'POST'],
 		['name' => 'status#reindexConfiaDoc', 'url' => '/admin/reindex-confia-doc', 'verb' => 'POST'],
 		['name' => 'status#getConfig', 'url' => '/admin/config', 'verb' => 'GET'],
